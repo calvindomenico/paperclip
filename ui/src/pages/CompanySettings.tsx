@@ -55,6 +55,13 @@ export function CompanySettings() {
   const [defaultExecutionPolicyText, setDefaultExecutionPolicyText] = useState("");
   const [defaultExecutionPolicyError, setDefaultExecutionPolicyError] = useState<string | null>(null);
 
+  // Tracks which company's defaultExecutionPolicy is currently loaded into
+  // the draft textarea, so an unrelated background refetch (e.g. after
+  // toggling requireBoardApprovalForNewAgents) does not clobber an in-progress
+  // edit. Only an actual company switch re-syncs the draft from the server.
+  const [defaultExecutionPolicySyncedCompanyId, setDefaultExecutionPolicySyncedCompanyId] =
+    useState<string | null>(null);
+
   // Sync local state from selected company
   useEffect(() => {
     if (!selectedCompany) return;
@@ -62,13 +69,16 @@ export function CompanySettings() {
     setDescription(selectedCompany.description ?? "");
     setLogoUrl(selectedCompany.logoUrl ?? "");
     setGovernance(selectedCompany.interactionResolverGovernance ?? {});
-    setDefaultExecutionPolicyText(
-      selectedCompany.defaultExecutionPolicy
-        ? JSON.stringify(selectedCompany.defaultExecutionPolicy, null, 2)
-        : ""
-    );
-    setDefaultExecutionPolicyError(null);
-  }, [selectedCompany]);
+    if (selectedCompany.id !== defaultExecutionPolicySyncedCompanyId) {
+      setDefaultExecutionPolicyText(
+        selectedCompany.defaultExecutionPolicy
+          ? JSON.stringify(selectedCompany.defaultExecutionPolicy, null, 2)
+          : ""
+      );
+      setDefaultExecutionPolicyError(null);
+      setDefaultExecutionPolicySyncedCompanyId(selectedCompany.id);
+    }
+  }, [selectedCompany, defaultExecutionPolicySyncedCompanyId]);
 
   const generalDirty =
     !!selectedCompany &&
@@ -122,24 +132,36 @@ export function CompanySettings() {
   // with no issue in scope would be a much larger change; this ships the
   // setting without blocking on that rework.
   const defaultExecutionPolicyMutation = useMutation({
-    mutationFn: (policy: Company["defaultExecutionPolicy"]) =>
-      companiesApi.putDefaultExecutionPolicy(selectedCompanyId!, policy),
-    onSuccess: (result) => {
+    mutationFn: ({
+      companyId,
+      policy
+    }: {
+      companyId: string;
+      policy: Company["defaultExecutionPolicy"];
+    }) => companiesApi.putDefaultExecutionPolicy(companyId, policy),
+    onSuccess: (result, variables) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+      // The user may have switched to a different company while this save
+      // was in flight; only the still-selected company's draft should be
+      // overwritten with the save result, or it clobbers the other
+      // company's unsaved (or already-saved) text.
+      if (variables.companyId !== selectedCompanyId) return;
       setDefaultExecutionPolicyText(
         result.defaultExecutionPolicy
           ? JSON.stringify(result.defaultExecutionPolicy, null, 2)
           : ""
       );
       setDefaultExecutionPolicyError(null);
-      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
     }
   });
 
   function handleSaveDefaultExecutionPolicy() {
+    if (!selectedCompanyId) return;
+    const companyId = selectedCompanyId;
     const trimmed = defaultExecutionPolicyText.trim();
     if (!trimmed) {
       setDefaultExecutionPolicyError(null);
-      defaultExecutionPolicyMutation.mutate(null);
+      defaultExecutionPolicyMutation.mutate({ companyId, policy: null });
       return;
     }
     let parsed: Company["defaultExecutionPolicy"];
@@ -150,7 +172,7 @@ export function CompanySettings() {
       return;
     }
     setDefaultExecutionPolicyError(null);
-    defaultExecutionPolicyMutation.mutate(parsed);
+    defaultExecutionPolicyMutation.mutate({ companyId, policy: parsed });
   }
 
   const defaultExecutionPolicyDirty =
