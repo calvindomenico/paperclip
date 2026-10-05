@@ -29780,7 +29780,6 @@ export function heartbeatService(
     reason = "Cancelled due to agent pause",
     errorCode = "cancelled",
   ) {
-    const agent = await getAgent(agentId);
     const runs = await db
       .select()
       .from(heartbeatRuns)
@@ -29791,67 +29790,24 @@ export function heartbeatService(
         ),
       );
 
+    // Route every run through the same compare-and-set path the control-plane
+    // Stop endpoint uses (cancelRunInternal), instead of writing "cancelled"
+    // unconditionally. A run found here in a cancellable status can still
+    // race a concurrent finalization (the adapter completing, a native
+    // reconciler, another Stop) between the select above and this loop
+    // reaching it. An unconditional write would not just clobber that
+    // outcome - the real finalization's own CAS write would then fail
+    // silently (status no longer "running"), causing it to skip its task
+    // session persistence entirely. Only count runs this call actually moved
+    // to "cancelled", so callers surfacing this count see what really
+    // happened rather than what was merely found.
+    let runsCancelled = 0;
     for (const run of runs) {
-      const stopOwnership =
-        run.runtimeMode !== "native"
-          ? captureAdapterStopOwnership(run.id)
-          : undefined;
-      try {
-        if (stopOwnership?.control) {
-          await cancelRunInternal(run.id, reason, { errorCode });
-          continue;
-        }
-        if (run.runtimeMode === "native") {
-          await db.update(heartbeatRuns).set({ resultJson:
-            sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ cancellation: requestedRunCancellation({}, reason) })}::jsonb`,
-          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, run.status)));
-          await cancelHeartbeatNativeRun({
-            db,
-            runId: run.id,
-            reason,
-            runtimeMode: run.runtimeMode,
-          });
-        }
-        const persistedCancellationResult =
-          run.runtimeMode === "native"
-            ? await getRun(run.id).then((current) =>
-                parseObject(current?.resultJson),
-              )
-            : parseObject(run.resultJson);
-        await setRunStatus(run.id, "cancelled", {
-          finishedAt: new Date(),
-          error: reason,
-          errorCode,
-          resultJson: {
-            ...persistedCancellationResult,
-            ...(agent ? mergeRunStopMetadataForAgent(agent, "cancelled", {
-              resultJson: persistedCancellationResult, errorCode, errorMessage: reason,
-            }) : {}),
-            cancellation: readRunCancellation(persistedCancellationResult) ?? requestedRunCancellation({}, reason),
-          },
-        });
-
-        await setWakeupStatus(run.wakeupRequestId, "cancelled", {
-          finishedAt: new Date(),
-          error: reason,
-        });
-
-        const running = runningProcesses.get(run.id);
-        if (running) {
-          await terminateHeartbeatRunProcess({
-            pid: running.child.pid,
-            processGroupId: running.processGroupId,
-            graceMs: Math.max(1, running.graceSec) * 1000,
-          });
-        }
-        runningProcesses.delete(run.id);
-        await releaseIssueExecutionAndPromote(run);
-      } finally {
-        stopOwnership?.release();
-      }
+      const cancelled = await cancelRunInternal(run.id, reason, { errorCode });
+      if (cancelled?.status === "cancelled") runsCancelled += 1;
     }
 
-    return runs.length;
+    return runsCancelled;
   }
 
   async function cancelPendingWakeupsForAgentsInternal(
