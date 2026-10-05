@@ -2,6 +2,7 @@ import { ChangeEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  type Company,
   type InteractionResolverGovernance,
   type IssueThreadInteractionKind,
 } from "@paperclipai/shared";
@@ -51,6 +52,8 @@ export function CompanySettings() {
   const [logoUrl, setLogoUrl] = useState("");
   const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
   const [governance, setGovernance] = useState<InteractionResolverGovernance>({});
+  const [defaultExecutionPolicyText, setDefaultExecutionPolicyText] = useState("");
+  const [defaultExecutionPolicyError, setDefaultExecutionPolicyError] = useState<string | null>(null);
 
   // Sync local state from selected company
   useEffect(() => {
@@ -59,6 +62,12 @@ export function CompanySettings() {
     setDescription(selectedCompany.description ?? "");
     setLogoUrl(selectedCompany.logoUrl ?? "");
     setGovernance(selectedCompany.interactionResolverGovernance ?? {});
+    setDefaultExecutionPolicyText(
+      selectedCompany.defaultExecutionPolicy
+        ? JSON.stringify(selectedCompany.defaultExecutionPolicy, null, 2)
+        : ""
+    );
+    setDefaultExecutionPolicyError(null);
   }, [selectedCompany]);
 
   const generalDirty =
@@ -104,6 +113,52 @@ export function CompanySettings() {
     setGovernance(next);
     governanceMutation.mutate(next);
   }
+
+  // Minimal editor for now: a raw-JSON textarea validated against
+  // issueExecutionPolicySchema server-side on save. The per-issue
+  // executionPolicy editor (IssueProperties.tsx) is tightly coupled to a
+  // single Issue (participant pickers keyed off issue.companyId,
+  // issue.createdByUserId, etc.) and adapting it to a company-wide template
+  // with no issue in scope would be a much larger change; this ships the
+  // setting without blocking on that rework.
+  const defaultExecutionPolicyMutation = useMutation({
+    mutationFn: (policy: Company["defaultExecutionPolicy"]) =>
+      companiesApi.putDefaultExecutionPolicy(selectedCompanyId!, policy),
+    onSuccess: (result) => {
+      setDefaultExecutionPolicyText(
+        result.defaultExecutionPolicy
+          ? JSON.stringify(result.defaultExecutionPolicy, null, 2)
+          : ""
+      );
+      setDefaultExecutionPolicyError(null);
+      queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+    }
+  });
+
+  function handleSaveDefaultExecutionPolicy() {
+    const trimmed = defaultExecutionPolicyText.trim();
+    if (!trimmed) {
+      setDefaultExecutionPolicyError(null);
+      defaultExecutionPolicyMutation.mutate(null);
+      return;
+    }
+    let parsed: Company["defaultExecutionPolicy"];
+    try {
+      parsed = JSON.parse(trimmed) as Company["defaultExecutionPolicy"];
+    } catch {
+      setDefaultExecutionPolicyError("Invalid JSON");
+      return;
+    }
+    setDefaultExecutionPolicyError(null);
+    defaultExecutionPolicyMutation.mutate(parsed);
+  }
+
+  const defaultExecutionPolicyDirty =
+    !!selectedCompany &&
+    defaultExecutionPolicyText.trim() !==
+      (selectedCompany.defaultExecutionPolicy
+        ? JSON.stringify(selectedCompany.defaultExecutionPolicy, null, 2)
+        : "");
 
   const syncLogoState = (nextLogoUrl: string | null) => {
     setLogoUrl(nextLogoUrl ?? "");
@@ -367,6 +422,55 @@ export function CompanySettings() {
             : null
         }
       />
+
+      {/* Default execution policy */}
+      <div className="max-w-2xl space-y-4" data-testid="company-settings-default-execution-policy-section">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Default execution policy
+        </div>
+        <Field
+          label="Applied to new tasks that don't set one"
+          hint={
+            "Raw JSON matching an issue's executionPolicy shape (stages, reviewPreset, " +
+            "maxReviewRounds, ...). Leave blank to clear the default. Does not apply to " +
+            "routine-generated or chat-thread tasks, and never overrides a task's own " +
+            "explicit executionPolicy."
+          }
+        >
+          <textarea
+            className="w-full min-h-32 rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm font-mono outline-none"
+            placeholder={'{\n  "stages": [\n    { "type": "approval", "participants": [...] }\n  ]\n}'}
+            value={defaultExecutionPolicyText}
+            onChange={(e) => setDefaultExecutionPolicyText(e.target.value)}
+            data-testid="company-settings-default-execution-policy-textarea"
+          />
+        </Field>
+        {defaultExecutionPolicyDirty && (
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={handleSaveDefaultExecutionPolicy}
+              disabled={defaultExecutionPolicyMutation.isPending}
+              data-testid="company-settings-default-execution-policy-save"
+            >
+              {defaultExecutionPolicyMutation.isPending ? "Saving..." : "Save changes"}
+            </Button>
+            {defaultExecutionPolicyMutation.isSuccess && (
+              <span className="text-xs text-muted-foreground">Saved</span>
+            )}
+          </div>
+        )}
+        {defaultExecutionPolicyError && (
+          <span className="text-xs text-destructive">{defaultExecutionPolicyError}</span>
+        )}
+        {defaultExecutionPolicyMutation.isError && (
+          <span className="text-xs text-destructive">
+            {defaultExecutionPolicyMutation.error instanceof Error
+              ? defaultExecutionPolicyMutation.error.message
+              : "Failed to save default execution policy"}
+          </span>
+        )}
+      </div>
 
       <InstanceGeneralSettings embedded />
 
