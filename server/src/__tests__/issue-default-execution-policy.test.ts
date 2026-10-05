@@ -272,6 +272,41 @@ describeEmbeddedPostgres("company/project default execution policy", () => {
     expect(row!.defaultExecutionPolicy).toBeNull();
   });
 
+  it("rejects a company default execution policy stage with no participants", async () => {
+    const company = await seedCompany();
+
+    const res = await request(app(boardActor))
+      .put(`/api/companies/${company.id}/default-execution-policy`)
+      .send({
+        defaultExecutionPolicy: {
+          stages: [{ type: "approval" }],
+        },
+      })
+      .expect(400);
+
+    expect(JSON.stringify(res.body)).toContain("at least one participant");
+    const [row] = await db.select().from(companies).where(eq(companies.id, company.id));
+    expect(row!.defaultExecutionPolicy).toBeNull();
+  });
+
+  it("rejects a project default execution policy stage with no participants", async () => {
+    const company = await seedCompany();
+    const project = await seedProject(company.id);
+
+    const res = await request(app(boardActor))
+      .put(`/api/projects/${project.id}/default-execution-policy`)
+      .send({
+        defaultExecutionPolicy: {
+          stages: [{ type: "review" }],
+        },
+      })
+      .expect(400);
+
+    expect(JSON.stringify(res.body)).toContain("at least one participant");
+    const [row] = await db.select().from(projects).where(eq(projects.id, project.id));
+    expect(row!.defaultExecutionPolicy).toBeNull();
+  });
+
   it("lets a board actor set and read back the company default execution policy", async () => {
     const company = await seedCompany();
 

@@ -4,7 +4,7 @@ import {
   ISSUE_THREAD_INTERACTION_RESOLVER_POLICIES,
 } from "../constants.js";
 import { objectWithoutDefaults } from "./partial.js";
-import { issueExecutionPolicySchema } from "./issue.js";
+import { issueExecutionPolicyTemplateSchema } from "./issue.js";
 
 const logoAssetIdSchema = z.string().guid().nullable().optional();
 const feedbackDataSharingTermsVersionSchema = z.string().min(1).nullable().optional();
@@ -71,7 +71,7 @@ export type UpdateCompanyBranding = z.infer<typeof updateCompanyBrandingSchema>;
 // server/src/services/issues.ts). Null clears the company default.
 export const putCompanyDefaultExecutionPolicySchema = z
   .object({
-    defaultExecutionPolicy: issueExecutionPolicySchema.nullable(),
+    defaultExecutionPolicy: issueExecutionPolicyTemplateSchema,
   })
   .strict();
 
