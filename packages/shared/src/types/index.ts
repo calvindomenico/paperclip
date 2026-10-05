@@ -705,6 +705,7 @@ export type {
   IssueExecutionStagePrincipal,
   IssueReviewRequest,
   IssueExecutionDecision,
+  IssueExecutionReassignment,
   IssueComment,
   IssueQueuedCommentEntry,
   IssueQueuedCommentProtocol,
