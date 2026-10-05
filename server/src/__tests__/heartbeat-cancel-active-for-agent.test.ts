@@ -170,7 +170,7 @@ describeEmbeddedPostgres("cancelActiveForAgentInternal", () => {
       // Warm up the second connection first so both sides start together.
       await dbB.select({ id: heartbeatRuns.id }).from(heartbeatRuns).limit(1);
 
-      const [cancelOutcome] = await Promise.all([
+      const [cancelOutcome, finalizationRows] = await Promise.all([
         heartbeat.cancelInvocationsForAgents([agentId], "Cancelled due to agent pause"),
         // Stand-in for the normal finalization path's own compare-and-set
         // write (setRunStatusIfRunning), without needing to drive a whole
@@ -187,17 +187,26 @@ describeEmbeddedPostgres("cancelActiveForAgentInternal", () => {
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, runId));
 
-      // Exactly one side can have won the compare-and-set; the row must land
-      // in a single consistent terminal state, never a mix of both.
-      if (finalRow.status === "succeeded") {
-        // The finalization won: the cancellation sweep's own write lost its
-        // compare-and-set and must not report this run as cancelled.
-        expect(cancelOutcome.runsCancelled).toBe(0);
+      // Read which side's compare-and-set actually matched the row, instead
+      // of inferring the winner from the final persisted status. Under the
+      // old blind-write bug, the cancellation sweep could overwrite a row
+      // *after* the finalization's own CAS already won it - so a final
+      // status of "cancelled" alone does not prove the sweep's CAS won too.
+      // Asserting against finalizationRows (empty unless the finalization's
+      // own `WHERE status = 'running'` matched) catches that regression even
+      // when the finalization-then-overwrite interleaving occurs.
+      const finalizationWon = finalizationRows.length > 0;
+      if (finalizationWon) {
+        // The finalization's own compare-and-set matched the row. The
+        // cancellation sweep must not have clobbered that outcome afterward,
+        // and must not report this run as cancelled.
+        expect(finalRow.status).toBe("succeeded");
         expect(finalRow.errorCode).toBeNull();
+        expect(cancelOutcome.runsCancelled).toBe(0);
       } else {
-        // The cancellation sweep won: it must report exactly the one run it
-        // actually moved, and the finalization's own write must have found
-        // zero matching rows rather than silently overwriting the outcome.
+        // The cancellation sweep's compare-and-set won first, so the
+        // finalization's own write found zero matching rows. The sweep must
+        // report exactly the one run it actually moved.
         expect(finalRow.status).toBe("cancelled");
         expect(cancelOutcome.runsCancelled).toBe(1);
       }
