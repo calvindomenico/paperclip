@@ -11,7 +11,7 @@
  *      baseline regex net. This is NOT a substitute for a real scanner; run
  *      the GitHub app's `run-secret-scanning` tool against the pushed branch
  *      or PR as the authoritative second pass.
- *   2. Internal ticket references (`TIE-123`, `PAP-224`, any `{PREFIX}-{NUMBER}`).
+ *   2. Internal ticket references (`TIE-123`, `PAP-224`, any `{PREFIX}-{NUMBER}`). (paperclip:allow-private-info: doc example)
  *   3. Company/instance-identifying strings: agent names, this machine's
  *      local paths, and live `PAPERCLIP_*` env var values (read from the
  *      environment, not hardcoded).
@@ -40,6 +40,13 @@ const SECRET_PATTERNS = [
 
 const TICKET_REF_RE = /\b[A-Z]{2,10}-\d{1,6}\b/;
 
+// Opt-in escape hatch, mirroring check-no-git-push.mjs's ALLOW_MARKER: this
+// script's own source and tests legitimately contain literal examples of
+// what it detects (sample ticket ids, denylisted names, a fake AWS key for
+// the test fixture). A same-line marker comment suppresses the match instead
+// of forcing those lines to be obfuscated into something less readable.
+export const ALLOW_MARKER = "paperclip:allow-private-info";
+
 const INTERNAL_LINK_RES = [
   { name: "instance-ui-path", re: /\/[A-Z]{2,10}\/(issues|agents|projects|approvals)\// },
   { name: "agent-uri", re: /agent:\/\// },
@@ -62,26 +69,26 @@ export function resolveDenylistStrings(env = process.env, osModule = os) {
   }
 
   // This machine's local paths. os.homedir()/$HOME reflect the *current*
-  // process's sandbox, which can differ from the real operator machine (e.g.
-  // a run-scoped sandbox HOME under /var/folders/... instead of the actual
-  // /Users/tieredit homedir) — so the real machine path is also listed
-  // explicitly rather than relying on the dynamic value alone.
+  // process's sandbox, which can differ from the real operator machine
+  // (e.g. a run-scoped sandbox HOME instead of the actual operator homedir)
+  // — so the real machine path is also listed explicitly rather than
+  // relying on the dynamic value alone.
   try {
     candidates.push(osModule.homedir());
   } catch {
     // Some environments do not expose homedir(); env fallback below covers it.
   }
-  candidates.push(env.HOME, env.USERPROFILE, "/Users/tieredit");
+  candidates.push(env.HOME, env.USERPROFILE, "/Users/tieredit"); // paperclip:allow-private-info: literal denylist entry, not a leak
 
   // Known company/agent identifiers that must never reach a public diff.
   candidates.push(
-    "Tiered Integration",
-    "Ada",
-    "Hal",
-    "Volt",
-    "Zed",
-    "Mason",
-    "local-board",
+    "Tiered Integration", // paperclip:allow-private-info: literal denylist entry, not a leak
+    "Ada", // paperclip:allow-private-info: literal denylist entry, not a leak
+    "Hal", // paperclip:allow-private-info: literal denylist entry, not a leak
+    "Volt", // paperclip:allow-private-info: literal denylist entry, not a leak
+    "Zed", // paperclip:allow-private-info: literal denylist entry, not a leak
+    "Mason", // paperclip:allow-private-info: literal denylist entry, not a leak
+    "local-board", // paperclip:allow-private-info: literal denylist entry, not a leak
   );
 
   return uniqueNonEmpty(candidates);
@@ -133,6 +140,8 @@ export function scanAddedLines(entries, denylistStrings) {
   const hits = [];
 
   for (const { file, line, text } of entries) {
+    if (text.includes(ALLOW_MARKER)) continue;
+
     for (const { name, re } of SECRET_PATTERNS) {
       const match = text.match(re);
       if (match) hits.push({ file, line, category: "secret", pattern: name, snippet: match[0] });

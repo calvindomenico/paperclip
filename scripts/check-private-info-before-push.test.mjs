@@ -17,8 +17,8 @@ const SAMPLE_DIFF = [
   "@@ -1,2 +1,4 @@",
   " const a = 1;",
   "-const old = 2;",
-  '+const key = "AKIAABCDEFGHIJKLMNOP";',
-  "+// see TIE-999 for context",
+  '+const key = "AKIAABCDEFGHIJKLMNOP";', // paperclip:allow-private-info: test fixture
+  "+// see TIE-999 for context", // paperclip:allow-private-info: test fixture
   "+const clean = 3;",
 ].join("\n");
 
@@ -27,34 +27,34 @@ test("parseAddedLines only captures added lines with correct line numbers", () =
   assert.deepEqual(
     entries.map((e) => [e.file, e.line, e.text]),
     [
-      ["foo.ts", 1, 'const key = "AKIAABCDEFGHIJKLMNOP";'],
-      ["foo.ts", 2, "// see TIE-999 for context"],
+      ["foo.ts", 1, 'const key = "AKIAABCDEFGHIJKLMNOP";'], // paperclip:allow-private-info: test fixture
+      ["foo.ts", 2, "// see TIE-999 for context"], // paperclip:allow-private-info: test fixture
       ["foo.ts", 3, "const clean = 3;"],
     ],
   );
 });
 
 test("scanAddedLines flags a seeded AWS-shaped key", () => {
-  const entries = [{ file: "foo.ts", line: 1, text: 'const key = "AKIAABCDEFGHIJKLMNOP";' }];
+  const entries = [{ file: "foo.ts", line: 1, text: 'const key = "AKIAABCDEFGHIJKLMNOP";' }]; // paperclip:allow-private-info: test fixture
   const hits = scanAddedLines(entries, []);
   assert.ok(hits.some((h) => h.category === "secret" && h.pattern === "aws-access-key-id"));
 });
 
 test("scanAddedLines flags an internal ticket reference", () => {
-  const entries = [{ file: "foo.ts", line: 1, text: "// see TIE-999 for context" }];
+  const entries = [{ file: "foo.ts", line: 1, text: "// see TIE-999 for context" }]; // paperclip:allow-private-info: test fixture
   const hits = scanAddedLines(entries, []);
-  assert.ok(hits.some((h) => h.category === "ticket-ref" && h.snippet === "TIE-999"));
+  assert.ok(hits.some((h) => h.category === "ticket-ref" && h.snippet === "TIE-999")); // paperclip:allow-private-info: test fixture
 });
 
 test("scanAddedLines flags a denylisted local path", () => {
-  const entries = [{ file: "foo.ts", line: 1, text: "// lives at /Users/tieredit/.paperclip" }];
-  const hits = scanAddedLines(entries, ["/Users/tieredit"]);
-  assert.ok(hits.some((h) => h.category === "instance-identifying" && h.snippet === "/Users/tieredit"));
+  const entries = [{ file: "foo.ts", line: 1, text: "// lives at /Users/tieredit/.paperclip" }]; // paperclip:allow-private-info: test fixture
+  const hits = scanAddedLines(entries, ["/Users/tieredit"]); // paperclip:allow-private-info: test fixture
+  assert.ok(hits.some((h) => h.category === "instance-identifying" && h.snippet === "/Users/tieredit")); // paperclip:allow-private-info: test fixture
 });
 
 test("scanAddedLines passes a clean line", () => {
   const entries = [{ file: "foo.ts", line: 1, text: "const clean = 3;" }];
-  const hits = scanAddedLines(entries, ["/Users/tieredit"]);
+  const hits = scanAddedLines(entries, ["/Users/tieredit"]); // paperclip:allow-private-info: test fixture
   assert.deepEqual(hits, []);
 });
 
@@ -70,27 +70,27 @@ test("resolveDenylistStrings pulls live PAPERCLIP_* values, not hardcoded guesse
 test("resolveDenylistStrings always includes the real machine path even when the sandbox HOME differs", () => {
   // A run-scoped sandbox can report a temp dir as $HOME/os.homedir() instead
   // of the operator's actual machine home — the known real path must still
-  // be present so paths like /Users/tieredit/... are always caught.
+  // be present so paths like /Users/tieredit/... are always caught. // paperclip:allow-private-info: test fixture
   const strings = resolveDenylistStrings(
     { HOME: "/var/folders/sandbox-tmp" },
     { homedir: () => "/var/folders/sandbox-tmp" },
   );
-  assert.ok(strings.includes("/Users/tieredit"));
+  assert.ok(strings.includes("/Users/tieredit")); // paperclip:allow-private-info: test fixture
 });
 
 test("formatReport redacts a live secret/env value instead of echoing it in full", () => {
   const report = formatReport([
-    { file: "foo.ts", line: 1, category: "secret", pattern: "aws-access-key-id", snippet: "AKIAABCDEFGHIJKLMNOP" },
+    { file: "foo.ts", line: 1, category: "secret", pattern: "aws-access-key-id", snippet: "AKIAABCDEFGHIJKLMNOP" }, // paperclip:allow-private-info: test fixture
   ]);
-  assert.ok(!report.includes("AKIAABCDEFGHIJKLMNOP"));
+  assert.ok(!report.includes("AKIAABCDEFGHIJKLMNOP")); // paperclip:allow-private-info: test fixture
   assert.ok(report.includes("redacted"));
 });
 
 test("formatReport prints ticket refs and instance links in full (not secret values)", () => {
   const report = formatReport([
-    { file: "foo.ts", line: 1, category: "ticket-ref", pattern: "internal-ticket-id", snippet: "TIE-999" },
+    { file: "foo.ts", line: 1, category: "ticket-ref", pattern: "internal-ticket-id", snippet: "TIE-999" }, // paperclip:allow-private-info: test fixture
   ]);
-  assert.ok(report.includes("TIE-999"));
+  assert.ok(report.includes("TIE-999")); // paperclip:allow-private-info: test fixture
 });
 
 test("runCheck exits 1 and reports hits on a dirty diff", () => {
@@ -100,7 +100,7 @@ test("runCheck exits 1 and reports hits on a dirty diff", () => {
     base: "origin/master",
     exec: () => SAMPLE_DIFF,
     env: {},
-    osModule: { homedir: () => "/Users/tieredit" },
+    osModule: { homedir: () => "/Users/tieredit" }, // paperclip:allow-private-info: test fixture
     log: (msg) => logs.push(msg),
     error: (msg) => errors.push(msg),
   });
@@ -108,8 +108,8 @@ test("runCheck exits 1 and reports hits on a dirty diff", () => {
   // The secret itself must never appear in the report output (see
   // formatReport's redaction test) — only the ticket ref, which is
   // structural rather than a credential, prints in full.
-  assert.ok(!errors.join("\n").includes("AKIAABCDEFGHIJKLMNOP"));
-  assert.ok(errors.join("\n").includes("TIE-999"));
+  assert.ok(!errors.join("\n").includes("AKIAABCDEFGHIJKLMNOP")); // paperclip:allow-private-info: test fixture
+  assert.ok(errors.join("\n").includes("TIE-999")); // paperclip:allow-private-info: test fixture
 });
 
 test("runCheck exits 0 on a clean diff", () => {
@@ -125,7 +125,7 @@ test("runCheck exits 0 on a clean diff", () => {
     base: "origin/master",
     exec: () => cleanDiff,
     env: {},
-    osModule: { homedir: () => "/Users/tieredit" },
+    osModule: { homedir: () => "/Users/tieredit" }, // paperclip:allow-private-info: test fixture
     log: (msg) => logs.push(msg),
     error: () => {},
   });
