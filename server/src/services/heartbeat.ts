@@ -13316,9 +13316,17 @@ export function heartbeatService(
       const invokability = await getAgentInvokability(agent);
       if (!invokability.invokable) {
         if (shouldCancelRunsForNonInvokableAgent(invokability)) {
+          // This sweep already runs inside this agent's start lock (we're in
+          // withAgentStartLock right now). Cancelling a queued run would
+          // otherwise try to promote the next queued run through the same
+          // lock, stalling each cancellation for up to the lock's stale
+          // timeout. There is nothing to promote anyway - the agent is not
+          // invokable, so this call returns [] right below regardless.
           await cancelActiveForAgentInternal(
             agentId,
             `Cancelled because the agent is not invokable: ${invokability.reason}`,
+            undefined,
+            { suppressQueuedRunPromotion: true },
           );
         }
         return [];
@@ -23026,6 +23034,13 @@ export function heartbeatService(
     terminationGraceMs?: number;
     /** Caller is immediately scheduling an explicit successor path. */
     suppressImmediateRecovery?: boolean;
+    /**
+     * Caller already holds (or is itself) the per-agent start lock, so the
+     * normal post-cancellation queued-run promotion would re-enter that same
+     * lock and stall for up to the lock's stale timeout. Skip it; the caller
+     * is responsible for promoting the next queued run itself if needed.
+     */
+    suppressQueuedRunPromotion?: boolean;
   };
 
   function cancellationTerminationGraceMs(
@@ -23039,11 +23054,25 @@ export function heartbeatService(
     return Math.max(100, Math.min(30_000, Math.trunc(requestedGraceMs)));
   }
 
+  // Thin wrapper preserving cancelRunInternal's long-standing contract (returns
+  // just the run) for its many existing callers, including the public cancelRun
+  // API. Callers that need to know whether *this* call actually performed the
+  // cancellation (as opposed to joining/observing one already settled by
+  // another path) should use cancelRunWithOutcomeInternal directly.
   async function cancelRunInternal(
     runId: string,
     reason = "Cancelled by control plane",
     options: CancelRunOptions = {},
   ) {
+    const { run } = await cancelRunWithOutcomeInternal(runId, reason, options);
+    return run;
+  }
+
+  async function cancelRunWithOutcomeInternal(
+    runId: string,
+    reason = "Cancelled by control plane",
+    options: CancelRunOptions = {},
+  ): Promise<{ run: typeof heartbeatRuns.$inferSelect | null; updated: boolean }> {
     let run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
     if (options.cancellationRequestId) {
@@ -23073,7 +23102,7 @@ export function heartbeatService(
         run.status as (typeof CANCELLABLE_HEARTBEAT_RUN_STATUSES)[number],
       )
     )
-      return run;
+      return { run, updated: false };
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
     const cancellation = requestedRunCancellation(options.resultJson ?? {}, reason);
@@ -23085,7 +23114,9 @@ export function heartbeatService(
       await pendingProcessCancellation.settled;
       if (pendingProcessCancellation.failed)
         throw pendingProcessCancellation.error;
-      return getRun(run.id);
+      // This call joined an in-flight cancellation owned by another caller on
+      // the same run; it did not itself perform the transition.
+      return { run: await getRun(run.id), updated: false };
     }
     const running = runningProcesses.get(run.id);
     const stopOwnership =
@@ -23131,7 +23162,7 @@ export function heartbeatService(
       }
       if (!fenced) {
         stopOwnership?.release();
-        return getRun(runId);
+        return { run: await getRun(runId), updated: false };
       }
       run = fenced;
     }
@@ -23354,9 +23385,11 @@ export function heartbeatService(
         await finalizeAgentStatus(run.agentId, "cancelled", undefined, {
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         });
-        await startNextQueuedRunForAgent(run.agentId);
+        if (!options.suppressQueuedRunPromotion) {
+          await startNextQueuedRunForAgent(run.agentId);
+        }
       }
-      return cancelled;
+      return { run: cancelled, updated: cancellation.updated };
     } finally {
       stopOwnership?.release();
     }
@@ -23366,6 +23399,7 @@ export function heartbeatService(
     agentId: string,
     reason = "Cancelled due to agent pause",
     errorCode = "cancelled",
+    options: { suppressQueuedRunPromotion?: boolean } = {},
   ) {
     const runs = await db
       .select()
@@ -23385,13 +23419,19 @@ export function heartbeatService(
     // reaching it. An unconditional write would not just clobber that
     // outcome - the real finalization's own CAS write would then fail
     // silently (status no longer "running"), causing it to skip its task
-    // session persistence entirely. Only count runs this call actually moved
-    // to "cancelled", so callers surfacing this count see what really
-    // happened rather than what was merely found.
+    // session persistence entirely. Use the outcome-reporting variant and
+    // count only runs *this call* actually transitioned - a run already
+    // cancelled by another concurrent caller (e.g. a user clicking Stop
+    // between the select above and this loop reaching it) must not be
+    // double-counted just because its final status happens to read
+    // "cancelled".
     let runsCancelled = 0;
     for (const run of runs) {
-      const cancelled = await cancelRunInternal(run.id, reason, { errorCode });
-      if (cancelled?.status === "cancelled") runsCancelled += 1;
+      const { updated } = await cancelRunWithOutcomeInternal(run.id, reason, {
+        errorCode,
+        suppressQueuedRunPromotion: options.suppressQueuedRunPromotion,
+      });
+      if (updated) runsCancelled += 1;
     }
 
     return runsCancelled;
