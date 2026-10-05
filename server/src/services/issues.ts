@@ -6623,9 +6623,9 @@ export async function readIssueCommentRunLogText(run: {
 // A routine-generated issue carries one of the origin kinds
 // server/src/services/routines.ts assigns at create time (see its
 // `issueOriginKind` local around the dispatch of a routine run): either the
-// flat "routine_execution" kind, or — when the routine drives a managed
-// plugin operation — a `plugin:<key>:operation` kind. Both are excluded from
-// the company/project default execution policy below; a routine's own
+// flat "routine_execution" kind, or — when the routine drives a plugin
+// operation — a `plugin:<key>:operation` kind. Both are excluded from the
+// company/project default execution policy below; a routine's own
 // configuration is the source of truth for its issues' sign-off gate.
 function isRoutineOriginatedIssueOriginKind(
   originKind: string | null | undefined,
