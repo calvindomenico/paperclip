@@ -284,6 +284,7 @@ import {
   ISSUE_WAKE_DIAGNOSTICS_MAX_ACTIVITY_RECORDS,
   ISSUE_WAKE_DIAGNOSTICS_MAX_WAKE_REQUESTS,
   readAcceptedPlanConfirmationTarget,
+  resolveDefaultIssueExecutionPolicy,
   type IssuePostCommitAction,
 } from "../services/issues.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
@@ -3944,7 +3945,19 @@ export function issueRoutes(
     projectId: string | null,
     requestedPolicy: unknown,
   ) {
-    const policy = normalizeIssueExecutionPolicy(requestedPolicy);
+    let policy = normalizeIssueExecutionPolicy(requestedPolicy);
+    // Only an omitted executionPolicy (not an explicit null/empty one) falls
+    // back to the project's, then the company's, defaultExecutionPolicy.
+    // These two HTTP create routes never produce routine-generated or
+    // conversation-thread issues, so no exclusion check is needed here —
+    // see resolveDefaultIssueExecutionPolicy's own callers in
+    // services/issues.ts for the paths that do.
+    if (requestedPolicy === undefined && policy === null) {
+      policy = await resolveDefaultIssueExecutionPolicy(db, {
+        companyId,
+        projectId,
+      });
+    }
     if (req.actor.type !== "agent") return policy;
     const trust = await resolveAgentTrustForIssue(
       { agentId: req.actor.agentId, runId: req.actor.runId },
