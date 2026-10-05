@@ -3,6 +3,7 @@ import { PROJECT_STATUSES, PROJECT_ICON_NAMES } from "../constants.js";
 import { envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema } from "./trust-policy.js";
 import { objectWithoutDefaults } from "./partial.js";
+import { issueExecutionPolicySchema } from "./issue.js";
 
 export const projectDiscoverySchema = z.object({
   limit: z.number().int().min(1).max(50).default(50),
@@ -136,5 +137,19 @@ export const updateProjectSchema = objectWithoutDefaults(
 ).partial();
 
 export type UpdateProject = z.infer<typeof updateProjectSchema>;
+
+// Overrides the company's defaultExecutionPolicy (see
+// packages/shared/src/validators/company.ts) for issues created in this
+// project when set. Null clears the project override, falling back to the
+// company default.
+export const putProjectDefaultExecutionPolicySchema = z
+  .object({
+    defaultExecutionPolicy: issueExecutionPolicySchema.nullable(),
+  })
+  .strict();
+
+export type PutProjectDefaultExecutionPolicy = z.infer<
+  typeof putProjectDefaultExecutionPolicySchema
+>;
 
 export type ProjectExecutionWorkspacePolicy = z.infer<typeof projectExecutionWorkspacePolicySchema>;
