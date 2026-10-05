@@ -23072,7 +23072,19 @@ export function heartbeatService(
     runId: string,
     reason = "Cancelled by control plane",
     options: CancelRunOptions = {},
-  ): Promise<{ run: typeof heartbeatRuns.$inferSelect | null; updated: boolean }> {
+  ): Promise<{
+    run: typeof heartbeatRuns.$inferSelect | null;
+    updated: boolean;
+    /**
+     * Set when this call drove an owned adapter's stop to completion but the
+     * adapter's own finalization (not this call) performed the terminal
+     * write, so `updated` is correctly false to avoid replaying its side
+     * effects. A bulk caller counting "runs this call actually stopped"
+     * should still count these - distinct from joining another caller's
+     * already in-flight cancellation, where this call contributed nothing.
+     */
+    causedCancellation?: boolean;
+  }> {
     let run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
     if (options.cancellationRequestId) {
@@ -23198,7 +23210,11 @@ export function heartbeatService(
           processCancellationSettlement,
         );
       }
-      const cancellation = await (async () => {
+      const cancellation: {
+        run: typeof heartbeatRuns.$inferSelect | null;
+        updated: boolean;
+        causedCancellation?: boolean;
+      } = await (async () => {
         try {
           if (control) {
             await db
@@ -23275,8 +23291,10 @@ export function heartbeatService(
                 );
               }
               // The owned adapter already finalized this run and its lifecycle.
-              // Do not replay the process cancellation side effects below.
-              return { run: stopped, updated: false };
+              // Do not replay the process cancellation side effects below -
+              // but this call is the one that aborted the adapter and waited
+              // for its stop, so it did cause the cancellation.
+              return { run: stopped, updated: false, causedCancellation: true };
             }
           }
 
@@ -23389,7 +23407,11 @@ export function heartbeatService(
           await startNextQueuedRunForAgent(run.agentId);
         }
       }
-      return { run: cancelled, updated: cancellation.updated };
+      return {
+        run: cancelled,
+        updated: cancellation.updated,
+        causedCancellation: cancellation.causedCancellation,
+      };
     } finally {
       stopOwnership?.release();
     }
@@ -23424,14 +23446,21 @@ export function heartbeatService(
     // cancelled by another concurrent caller (e.g. a user clicking Stop
     // between the select above and this loop reaching it) must not be
     // double-counted just because its final status happens to read
-    // "cancelled".
+    // "cancelled". An owned adapter is the one exception: this call drives
+    // its stop, but the adapter's own finalization performs the terminal
+    // write, so `causedCancellation` (not `updated`) attributes that run to
+    // this sweep without replaying the adapter's already-applied side effects.
     let runsCancelled = 0;
     for (const run of runs) {
-      const { updated } = await cancelRunWithOutcomeInternal(run.id, reason, {
+      const { updated, causedCancellation } = await cancelRunWithOutcomeInternal(run.id, reason, {
         errorCode,
         suppressQueuedRunPromotion: options.suppressQueuedRunPromotion,
       });
-      if (updated) runsCancelled += 1;
+      // An owned adapter's own finalization performs the terminal write (so
+      // `updated` is false to avoid replaying its side effects), but this
+      // call still drove that adapter's stop and should count as one this
+      // sweep actually stopped.
+      if (updated || causedCancellation) runsCancelled += 1;
     }
 
     return runsCancelled;
