@@ -12405,8 +12405,24 @@ export function issueRoutes(
       const actor = getActorInfo(req);
       const normalizedChildren = [];
       for (const child of requestedChildren) {
+        let resolvedExecutionPolicy = normalizeIssueExecutionPolicy(
+          child.executionPolicy,
+        );
+        // Only an omitted executionPolicy (not an explicit null/empty one)
+        // falls back to the project's, then the company's,
+        // defaultExecutionPolicy — mirrors resolveCreatedIssueExecutionPolicy
+        // above, which the two top-level create routes use.
+        if (child.executionPolicy === undefined && resolvedExecutionPolicy === null) {
+          resolvedExecutionPolicy = await resolveDefaultIssueExecutionPolicy(
+            db,
+            {
+              companyId: sourceIssue.companyId,
+              projectId: child.projectId ?? sourceIssue.projectId ?? null,
+            },
+          );
+        }
         const executionPolicy = applyActorMonitorScheduledBy(
-          normalizeIssueExecutionPolicy(child.executionPolicy),
+          resolvedExecutionPolicy,
           actor.actorType,
         );
         await assertCanManageIssueMonitor(
