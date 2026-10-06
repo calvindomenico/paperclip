@@ -2094,6 +2094,13 @@
       "when": 1791260726828,
       "tag": "0300_chunky_chamber",
       "breakpoints": true
+    },
+    {
+      "idx": 301,
+      "version": "7",
+      "when": 1791298313895,
+      "tag": "0301_same_titanium_man",
+      "breakpoints": true
     }
   ]
 }
