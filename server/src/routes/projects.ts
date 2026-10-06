@@ -408,6 +408,7 @@ export function projectRoutes(db: Db) {
     const id = req.params.id as string;
     const project = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
     if (!project) return;
+    if (!(await assertProjectReadAllowed(req, res, project))) return;
     res.json({ defaultExecutionPolicy: project.defaultExecutionPolicy ?? null });
   });
 
