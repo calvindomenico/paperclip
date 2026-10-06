@@ -157,12 +157,16 @@ async function seedValidWorktreeSource(
     userId,
     role: "instance_admin",
   });
-  await db.insert(companies).values({
-    id: companyId,
-    name: "Seed Source",
-    issuePrefix: "SEED",
-    requireBoardApprovalForNewAgents: false,
-  });
+  // Like the issues insert below, this seeds an intentionally older schema:
+  // the current Drizzle insert builder lists every schema-declared column
+  // (using DEFAULT for ones not passed), including columns a migration not
+  // yet applied to this source is about to add -- e.g. companies.default_
+  // execution_policy. Use a raw insert with an explicit column list so this
+  // fixture keeps working regardless of which migration is pending.
+  await db.$client`
+    insert into companies (id, name, issue_prefix, require_board_approval_for_new_agents)
+    values (${companyId}, 'Seed Source', 'SEED', false)
+  `;
   await db.insert(companyMemberships).values({
     companyId,
     principalType: "user",
