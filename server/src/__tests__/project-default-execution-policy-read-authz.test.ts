@@ -84,7 +84,7 @@ describe("GET /projects/:id/default-execution-policy authorization", () => {
       allowed: true,
       action: "project:read",
       reason: "allow_company_agent",
-      explanation: "Allowed by standard same-company agent visibility.",
+      explanation: "Allowed by default same-company agent visibility.",
     });
     const app = createApp({ type: "agent", agentId: "agent-1", companyId: "company-1", runId: "run-1" });
 
