@@ -338,6 +338,39 @@ describeEmbeddedPostgres("company/project default execution policy", () => {
     expect(res.body.assigneeAgentId).toBe(creator.id);
   });
 
+  it("drops the company default's monitor, without a 422, on an ordinary create that starts in todo/backlog", async () => {
+    const company = await seedCompany();
+    const creator = await seedAgentRow(company.id);
+    await db
+      .update(companies)
+      .set({
+        defaultExecutionPolicy: {
+          mode: "normal",
+          commentRequired: true,
+          stages: [],
+          monitor: { nextCheckAt: new Date(Date.now() + 60_000).toISOString() },
+        } as never,
+      })
+      .where(eq(companies.id, company.id));
+
+    // Omitting status defaults a self-assigned create to "todo", which
+    // buildInitialIssueMonitorFields rejects with a 422 for any monitor
+    // (inherited or explicit) regardless of who is authorized to manage it.
+    // The inherited monitor must be dropped before it reaches that check,
+    // not 422 an otherwise-ordinary, fully-authorized create.
+    const res = await request(app(agentActor(creator.id, company.id)))
+      .post(`/api/companies/${company.id}/issues`)
+      .send({
+        title: "Self-assigned, no status override, picks up company default",
+        assigneeAgentId: creator.id,
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.status).toBe("todo");
+    expect(res.body.executionPolicy?.monitor ?? null).toBeNull();
+    expect(res.body.assigneeAgentId).toBe(creator.id);
+  });
+
   it("drops the company default's monitor, without 403ing, when handing a task to a different assignee the creator can't manage monitors for", async () => {
     const company = await seedCompany();
     const creator = await seedAgentRow(company.id);

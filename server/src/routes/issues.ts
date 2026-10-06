@@ -304,6 +304,7 @@ import {
 } from "../services/company-search-rate-limit.js";
 import {
   applyIssueExecutionPolicyTransition,
+  issueAllowsMonitor,
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
   redactIssueMonitorExternalRef,
@@ -2241,15 +2242,27 @@ async function canManageIssueMonitor(
 // otherwise get a monitor silently scheduled on an issue it has no standing
 // to manage. Drop the inherited monitor rather than 403ing the create or
 // scheduling a monitor the creator isn't authorized for.
+//
+// Separately, buildInitialIssueMonitorFields() rejects a monitor outright
+// (422) unless the new issue already has an agent assignee and starts in
+// in_progress/in_review. Most creates start in backlog/todo, so an inherited
+// monitor would 422 ordinary, fully-authorized creates too. Drop it there as
+// well — the default's approval stages still apply, only the monitor is
+// skipped for an issue that can't carry one yet.
 async function withAuthorizedInheritedMonitor(
   accessSvc: ReturnType<typeof accessService>,
   req: Request,
   companyId: string,
   assigneeAgentId: string | null,
+  assigneeUserId: string | null,
+  status: string,
   policy: NormalizedExecutionPolicy | null,
   monitorFromRequest: boolean,
 ): Promise<NormalizedExecutionPolicy | null> {
   if (!policy?.monitor || monitorFromRequest) return policy;
+  if (!issueAllowsMonitor(status, assigneeAgentId, assigneeUserId)) {
+    return normalizeIssueExecutionPolicy({ ...policy, monitor: undefined });
+  }
   if (await canManageIssueMonitor(accessSvc, req, companyId, assigneeAgentId)) {
     return policy;
   }
@@ -11885,6 +11898,8 @@ export function issueRoutes(
         req,
         companyId,
         createBody.assigneeAgentId ?? null,
+        createBody.assigneeUserId ?? null,
+        createBody.status,
         resolvedExecutionPolicy,
         monitorFromRequest,
       );
@@ -12246,6 +12261,8 @@ export function issueRoutes(
         req,
         parent.companyId,
         createBody.assigneeAgentId ?? null,
+        createBody.assigneeUserId ?? null,
+        createBody.status,
         resolvedExecutionPolicy,
         monitorFromRequest,
       );
@@ -12502,6 +12519,8 @@ export function issueRoutes(
           req,
           sourceIssue.companyId,
           child.assigneeAgentId ?? null,
+          child.assigneeUserId ?? null,
+          child.status,
           resolvedExecutionPolicy,
           monitorFromRequest,
         );
