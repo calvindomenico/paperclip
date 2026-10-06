@@ -247,7 +247,7 @@ GET /api/companies/{companyId}/default-execution-policy
 
 `PUT /api/projects/{projectId}/default-execution-policy` sets the project-level override with the same shape. `PUT` either endpoint with `{ "defaultExecutionPolicy": null }` to clear it.
 
-- Only board actors can read or write a default; an agent or user caller gets `403`.
+- Callers with company access can read defaults. Only board actors can write them; agent callers receive `403` on `PUT`.
 - Each issue that inherits a default gets its own fresh stage and participant IDs — the stored template is never attached to more than one issue by reference.
 - A stage with no participants is rejected outright (`400`) when saving a default template, rather than being silently dropped like it is on a per-issue `executionPolicy` (see above). A template has no issue-specific participant to fall back on, so an empty stage here is always a mistake, not a case worth tolerating.
 - Routine-generated issues (`originKind: "routine_execution"` or a plugin-operation origin) and conversation-thread issues (both `conversationAgentId` and `conversationUserId` set) never inherit a default — a routine's own configuration, or an ephemeral chat thread, should not pick up a sign-off gate meant for tracked work.
