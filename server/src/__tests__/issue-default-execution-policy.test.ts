@@ -307,7 +307,38 @@ describeEmbeddedPostgres("company/project default execution policy", () => {
     expect(row!.defaultExecutionPolicy).toBeNull();
   });
 
-  it("lets an agent create a task for a different assignee when the company default includes a monitor", async () => {
+  it("keeps the company default's monitor when the creator self-assigns the new task", async () => {
+    const company = await seedCompany();
+    const creator = await seedAgentRow(company.id);
+    await db
+      .update(companies)
+      .set({
+        defaultExecutionPolicy: {
+          mode: "normal",
+          commentRequired: true,
+          stages: [],
+          monitor: { nextCheckAt: new Date(Date.now() + 60_000).toISOString() },
+        } as never,
+      })
+      .where(eq(companies.id, company.id));
+
+    // The creator is the assignee, so the inherited monitor is squarely
+    // within what assertCanManageIssueMonitor already allows an assignee to
+    // hold for its own task -- it must come through, and must not 403.
+    const res = await request(app(agentActor(creator.id, company.id)))
+      .post(`/api/companies/${company.id}/issues`)
+      .send({
+        title: "Self-assigned, picks up company default",
+        assigneeAgentId: creator.id,
+        status: "in_progress",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.executionPolicy.monitor).toBeTruthy();
+    expect(res.body.assigneeAgentId).toBe(creator.id);
+  });
+
+  it("drops the company default's monitor, without 403ing, when handing a task to a different assignee the creator can't manage monitors for", async () => {
     const company = await seedCompany();
     const creator = await seedAgentRow(company.id);
     const assignee = await seedAgentRow(company.id);
@@ -323,10 +354,13 @@ describeEmbeddedPostgres("company/project default execution policy", () => {
       })
       .where(eq(companies.id, company.id));
 
-    // The creating agent is not the assignee, so if the inherited default's
-    // monitor were mistakenly treated as an explicit monitor change,
-    // assertCanManageIssueMonitor would 403 here even though creating and
-    // assigning this task is otherwise allowed for the creator.
+    // The creator is neither the assignee nor privileged to manage monitors
+    // on the assignee's behalf. Creating and handing off the task is still
+    // allowed (the original P1 this guards against), but the inherited
+    // monitor must not be silently attached -- that would let any
+    // same-company agent force monitor scheduling onto another agent's task
+    // purely by omitting executionPolicy, with no authorization check ever
+    // running.
     const res = await request(app(agentActor(creator.id, company.id)))
       .post(`/api/companies/${company.id}/issues`)
       .send({
@@ -336,7 +370,7 @@ describeEmbeddedPostgres("company/project default execution policy", () => {
       });
 
     expect(res.status, JSON.stringify(res.body)).toBe(201);
-    expect(res.body.executionPolicy.monitor).toBeTruthy();
+    expect(res.body.executionPolicy?.monitor ?? null).toBeNull();
     expect(res.body.assigneeAgentId).toBe(assignee.id);
   });
 

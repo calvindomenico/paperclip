@@ -2214,6 +2214,48 @@ async function assertCanManageIssueMonitor(
   );
 }
 
+async function canManageIssueMonitor(
+  accessSvc: ReturnType<typeof accessService>,
+  req: Request,
+  companyId: string,
+  assigneeAgentId: string | null,
+): Promise<boolean> {
+  if (req.actor.type === "board") return true;
+  const runtimeDecision = await accessSvc.decide({
+    actor: req.actor,
+    action: "runtime:manage",
+    resource: { type: "company", companyId },
+  });
+  if (!runtimeDecision.allowed) return false;
+  return Boolean(
+    req.actor.type === "agent" &&
+      req.actor.agentId &&
+      req.actor.agentId === assigneeAgentId,
+  );
+}
+
+// A monitor that only arrived via an inherited company/project default never
+// goes through assertCanManageIssueMonitor (it gates on monitorFromRequest,
+// not on the effective policy, so a default-inherited monitor doesn't 403 a
+// creator who didn't ask for one). That means an unprivileged creator could
+// otherwise get a monitor silently scheduled on an issue it has no standing
+// to manage. Drop the inherited monitor rather than 403ing the create or
+// scheduling a monitor the creator isn't authorized for.
+async function withAuthorizedInheritedMonitor(
+  accessSvc: ReturnType<typeof accessService>,
+  req: Request,
+  companyId: string,
+  assigneeAgentId: string | null,
+  policy: NormalizedExecutionPolicy | null,
+  monitorFromRequest: boolean,
+): Promise<NormalizedExecutionPolicy | null> {
+  if (!policy?.monitor || monitorFromRequest) return policy;
+  if (await canManageIssueMonitor(accessSvc, req, companyId, assigneeAgentId)) {
+    return policy;
+  }
+  return normalizeIssueExecutionPolicy({ ...policy, monitor: undefined });
+}
+
 function summarizeIssueMonitor(
   issue: {
     monitorNextCheckAt?: Date | null;
@@ -11838,8 +11880,16 @@ export function issueRoutes(
           createAssignmentScope.projectId,
           createBody.executionPolicy,
         );
-      const executionPolicy = applyActorMonitorScheduledBy(
+      const authorizedExecutionPolicy = await withAuthorizedInheritedMonitor(
+        access,
+        req,
+        companyId,
+        createBody.assigneeAgentId ?? null,
         resolvedExecutionPolicy,
+        monitorFromRequest,
+      );
+      const executionPolicy = applyActorMonitorScheduledBy(
+        authorizedExecutionPolicy,
         actor.actorType,
       );
       await assertCanManageIssueMonitor(
@@ -12191,8 +12241,16 @@ export function issueRoutes(
           childAssignmentScope.projectId,
           createBody.executionPolicy,
         );
-      const executionPolicy = applyActorMonitorScheduledBy(
+      const authorizedExecutionPolicy = await withAuthorizedInheritedMonitor(
+        access,
+        req,
+        parent.companyId,
+        createBody.assigneeAgentId ?? null,
         resolvedExecutionPolicy,
+        monitorFromRequest,
+      );
+      const executionPolicy = applyActorMonitorScheduledBy(
+        authorizedExecutionPolicy,
         actor.actorType,
       );
       await assertCanManageIssueMonitor(
@@ -12439,8 +12497,16 @@ export function issueRoutes(
             },
           );
         }
-        const executionPolicy = applyActorMonitorScheduledBy(
+        const authorizedExecutionPolicy = await withAuthorizedInheritedMonitor(
+          access,
+          req,
+          sourceIssue.companyId,
+          child.assigneeAgentId ?? null,
           resolvedExecutionPolicy,
+          monitorFromRequest,
+        );
+        const executionPolicy = applyActorMonitorScheduledBy(
+          authorizedExecutionPolicy,
           actor.actorType,
         );
         await assertCanManageIssueMonitor(
