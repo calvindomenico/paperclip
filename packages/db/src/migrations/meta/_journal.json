@@ -2098,8 +2098,22 @@
     {
       "idx": 301,
       "version": "7",
-      "when": 1791298313895,
-      "tag": "0301_same_titanium_man",
+      "when": 1791298125105,
+      "tag": "0301_lumpy_maria_hill",
+      "breakpoints": true
+    },
+    {
+      "idx": 302,
+      "version": "7",
+      "when": 1791298148518,
+      "tag": "0302_colossal_otto_octavius",
+      "breakpoints": true
+    },
+    {
+      "idx": 303,
+      "version": "7",
+      "when": 1791306686122,
+      "tag": "0303_dazzling_apocalypse",
       "breakpoints": true
     }
   ]
