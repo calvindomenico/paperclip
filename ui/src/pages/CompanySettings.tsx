@@ -71,13 +71,22 @@ export function CompanySettings() {
   const [defaultExecutionPolicySyncedCompanyId, setDefaultExecutionPolicySyncedCompanyId] =
     useState<string | null>(null);
 
-  // Sync local state from selected company
+  // Sync general (name/description/logo/governance) local state from the
+  // selected company. Deliberately does NOT depend on
+  // defaultExecutionPolicyDirty -- it must not rerun (and clobber unsaved
+  // name/description edits) just because the user typed in the unrelated
+  // policy textarea below.
   useEffect(() => {
     if (!selectedCompany) return;
     setCompanyName(selectedCompany.name);
     setDescription(selectedCompany.description ?? "");
     setLogoUrl(selectedCompany.logoUrl ?? "");
     setGovernance(selectedCompany.interactionResolverGovernance ?? {});
+  }, [selectedCompany]);
+
+  // Sync the default execution policy draft from the selected company.
+  useEffect(() => {
+    if (!selectedCompany) return;
     const companyChanged = selectedCompany.id !== defaultExecutionPolicySyncedCompanyId;
     // Refresh the draft on a company switch (even if the outgoing draft was
     // dirty), or whenever the draft is clean -- so an external update to the
@@ -153,6 +162,7 @@ export function CompanySettings() {
     }: {
       companyId: string;
       policy: Company["defaultExecutionPolicy"];
+      submittedText: string;
     }) => companiesApi.putDefaultExecutionPolicy(companyId, policy),
     onSuccess: (result, variables) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
@@ -161,6 +171,12 @@ export function CompanySettings() {
       // overwritten with the save result, or it clobbers the other
       // company's unsaved (or already-saved) text.
       if (variables.companyId !== selectedCompanyId) return;
+      // The user may have kept typing in the textarea after clicking Save,
+      // while this request was in flight. If the draft no longer matches
+      // what was actually submitted, it holds a newer, unsaved edit --
+      // overwriting it with the (now-stale) save result would silently
+      // discard that edit, and clearing dirty would make it look saved.
+      if (defaultExecutionPolicyText !== variables.submittedText) return;
       setDefaultExecutionPolicyText(
         result.defaultExecutionPolicy
           ? JSON.stringify(result.defaultExecutionPolicy, null, 2)
@@ -174,10 +190,11 @@ export function CompanySettings() {
   function handleSaveDefaultExecutionPolicy() {
     if (!selectedCompanyId) return;
     const companyId = selectedCompanyId;
-    const trimmed = defaultExecutionPolicyText.trim();
+    const submittedText = defaultExecutionPolicyText;
+    const trimmed = submittedText.trim();
     if (!trimmed) {
       setDefaultExecutionPolicyError(null);
-      defaultExecutionPolicyMutation.mutate({ companyId, policy: null });
+      defaultExecutionPolicyMutation.mutate({ companyId, policy: null, submittedText });
       return;
     }
     let parsed: Company["defaultExecutionPolicy"];
@@ -188,7 +205,7 @@ export function CompanySettings() {
       return;
     }
     setDefaultExecutionPolicyError(null);
-    defaultExecutionPolicyMutation.mutate({ companyId, policy: parsed });
+    defaultExecutionPolicyMutation.mutate({ companyId, policy: parsed, submittedText });
   }
 
   const syncLogoState = (nextLogoUrl: string | null) => {
