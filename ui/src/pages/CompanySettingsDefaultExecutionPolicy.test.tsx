@@ -274,4 +274,38 @@ describe("CompanySettings default execution policy draft", () => {
     // The save button must still read as actionable, not mid-flight.
     expect(saveButton!.textContent).toBe("Save changes");
   });
+
+  it("still clears the dirty flag after a successful save when the companies-stats cache holds a non-list shape", async () => {
+    // queryKeys.companies.all is the prefix ["companies"], which also
+    // matches the stats cache entry (shape: CompanyStats, no `companies`
+    // array). The post-save cache patch must skip it rather than crash --
+    // a crash here would abort onSuccess before the dirty flag clears,
+    // leaving a successful save looking permanently unsaved.
+    const { queryKeys } = await import("../lib/queryKeys");
+    queryClient.setQueryData(queryKeys.companies.stats, { totalCompanies: 1 });
+
+    mockCompaniesApi.putDefaultExecutionPolicy.mockResolvedValue({
+      defaultExecutionPolicy: { stages: [] },
+    });
+
+    setInputValue(getPolicyTextarea(container), '{"stages":[]}');
+    await flushReact();
+
+    const saveButton = container.querySelector(
+      "[data-testid='company-settings-default-execution-policy-save']",
+    ) as HTMLButtonElement | null;
+    expect(saveButton).toBeTruthy();
+
+    await act(async () => {
+      saveButton!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await flushReact();
+    await flushReact();
+
+    // The save succeeded and the draft matches it, so the dirty flag must
+    // have cleared -- the whole save-button block unmounts once it does.
+    expect(
+      container.querySelector("[data-testid='company-settings-default-execution-policy-save']"),
+    ).toBeNull();
+  });
 });

@@ -2186,14 +2186,60 @@ const ACCEPTED_PLAN_DECOMPOSITION_FINGERPRINT_CHILD_METADATA_KEYS = new Set([
   "skipExecutionWorkspaceInheritance",
 ]);
 
+// normalizeIssueExecutionPolicy mints a fresh randomUUID for any stage or
+// participant that arrives without an id -- which includes every policy
+// resolved from a company/project default (instantiateExecutionPolicyTemplate
+// strips the template's ids on purpose) and any caller-supplied policy that
+// simply omits them. Leaving those ids in the fingerprint would make an
+// identical retry of the same decomposition request look like a different
+// child set and fail with a 409.
+function stripExecutionPolicyIdsForFingerprint(policy: unknown): unknown {
+  if (!policy || typeof policy !== "object") return policy;
+  const { stages, ...rest } = policy as { stages?: unknown[] } & Record<
+    string,
+    unknown
+  >;
+  if (!Array.isArray(stages)) return policy;
+  return {
+    ...rest,
+    stages: stages.map((stage) => {
+      if (!stage || typeof stage !== "object") return stage;
+      const { id: _stageId, participants, ...stageRest } = stage as {
+        id?: unknown;
+        participants?: unknown[];
+      } & Record<string, unknown>;
+      return {
+        ...stageRest,
+        participants: Array.isArray(participants)
+          ? participants.map((participant) => {
+              if (!participant || typeof participant !== "object")
+                return participant;
+              const { id: _participantId, ...participantRest } =
+                participant as Record<string, unknown>;
+              return participantRest;
+            })
+          : participants,
+      };
+    }),
+  };
+}
+
 function normalizeAcceptedPlanDecompositionFingerprintChild(
   child: IssueChildCreateInput,
 ) {
   return Object.fromEntries(
-    Object.entries(child).filter(
-      ([key]) =>
-        !ACCEPTED_PLAN_DECOMPOSITION_FINGERPRINT_CHILD_METADATA_KEYS.has(key),
-    ),
+    Object.entries(child)
+      .filter(
+        ([key]) =>
+          !ACCEPTED_PLAN_DECOMPOSITION_FINGERPRINT_CHILD_METADATA_KEYS.has(
+            key,
+          ),
+      )
+      .map(([key, value]) =>
+        key === "executionPolicy"
+          ? [key, stripExecutionPolicyIdsForFingerprint(value)]
+          : [key, value],
+      ),
   );
 }
 

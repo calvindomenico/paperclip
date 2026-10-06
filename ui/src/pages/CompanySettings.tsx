@@ -187,17 +187,24 @@ export function CompanySettings() {
       // instead of racing it. invalidateQueries still runs after, so any
       // server-side normalization beyond what `result` reports is picked up
       // too.
+      // queryKeys.companies.all is a prefix ["companies"], so this also
+      // matches the stats/directory/detail cache entries, which don't carry
+      // a `companies` array -- skip those rather than crash this callback
+      // (a crash here would abort before the dirty flag clears below, so a
+      // save that actually succeeded on the server would read as failed).
       queryClient.setQueriesData<CompanyListResult>(
         { queryKey: queryKeys.companies.all },
         (current) =>
-          current && {
-            ...current,
-            companies: current.companies.map((company) =>
-              company.id === variables.companyId
-                ? { ...company, defaultExecutionPolicy: result.defaultExecutionPolicy }
-                : company
-            ),
-          }
+          current && Array.isArray(current.companies)
+            ? {
+                ...current,
+                companies: current.companies.map((company) =>
+                  company.id === variables.companyId
+                    ? { ...company, defaultExecutionPolicy: result.defaultExecutionPolicy }
+                    : company
+                ),
+              }
+            : current
       );
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
       // The user may have switched to a different company while this save
