@@ -1,9 +1,7 @@
 // @vitest-environment jsdom
 //
-// Regression coverage for two Greptile P2 findings on PR #15267
-// (https://github.com/paperclipai/paperclip/pull/15267#discussion_r4190398430
-// and #discussion_r4190398435) against the default-execution-policy editor
-// in CompanySettings.tsx:
+// Regression coverage for two Greptile P2 findings on PR #15267 against
+// the default-execution-policy editor in CompanySettings.tsx:
 //
 //   1. Typing in the policy textarea must not discard unsaved
 //      name/description edits (the general-fields sync effect must not
