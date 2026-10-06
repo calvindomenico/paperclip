@@ -55,10 +55,19 @@ export function CompanySettings() {
   const [defaultExecutionPolicyText, setDefaultExecutionPolicyText] = useState("");
   const [defaultExecutionPolicyError, setDefaultExecutionPolicyError] = useState<string | null>(null);
 
+  // Whether the draft has unsaved edits since it was last synced from the
+  // server. Set on every textarea keystroke, cleared whenever the draft is
+  // freshly synced from selectedCompany.defaultExecutionPolicy or right
+  // after a successful save. This (not the companyId check below) is what
+  // protects an in-progress edit from being clobbered by an unrelated
+  // background refetch (e.g. after toggling requireBoardApprovalForNewAgents).
+  const [defaultExecutionPolicyDirty, setDefaultExecutionPolicyDirty] = useState(false);
+
   // Tracks which company's defaultExecutionPolicy is currently loaded into
-  // the draft textarea, so an unrelated background refetch (e.g. after
-  // toggling requireBoardApprovalForNewAgents) does not clobber an in-progress
-  // edit. Only an actual company switch re-syncs the draft from the server.
+  // the draft textarea. A company switch always re-syncs (and discards any
+  // unsaved draft for the company being left) regardless of dirty state --
+  // otherwise an edited-but-unsaved draft for the previous company would
+  // keep showing under the newly-selected company.
   const [defaultExecutionPolicySyncedCompanyId, setDefaultExecutionPolicySyncedCompanyId] =
     useState<string | null>(null);
 
@@ -69,16 +78,22 @@ export function CompanySettings() {
     setDescription(selectedCompany.description ?? "");
     setLogoUrl(selectedCompany.logoUrl ?? "");
     setGovernance(selectedCompany.interactionResolverGovernance ?? {});
-    if (selectedCompany.id !== defaultExecutionPolicySyncedCompanyId) {
+    const companyChanged = selectedCompany.id !== defaultExecutionPolicySyncedCompanyId;
+    // Refresh the draft on a company switch (even if the outgoing draft was
+    // dirty), or whenever the draft is clean -- so an external update to the
+    // same company's policy (e.g. a background refetch after another tab
+    // changed it) is reflected. Never overwrite a dirty, same-company draft.
+    if (companyChanged || !defaultExecutionPolicyDirty) {
       setDefaultExecutionPolicyText(
         selectedCompany.defaultExecutionPolicy
           ? JSON.stringify(selectedCompany.defaultExecutionPolicy, null, 2)
           : ""
       );
       setDefaultExecutionPolicyError(null);
+      setDefaultExecutionPolicyDirty(false);
       setDefaultExecutionPolicySyncedCompanyId(selectedCompany.id);
     }
-  }, [selectedCompany, defaultExecutionPolicySyncedCompanyId]);
+  }, [selectedCompany, defaultExecutionPolicySyncedCompanyId, defaultExecutionPolicyDirty]);
 
   const generalDirty =
     !!selectedCompany &&
@@ -152,6 +167,7 @@ export function CompanySettings() {
           : ""
       );
       setDefaultExecutionPolicyError(null);
+      setDefaultExecutionPolicyDirty(false);
     }
   });
 
@@ -174,13 +190,6 @@ export function CompanySettings() {
     setDefaultExecutionPolicyError(null);
     defaultExecutionPolicyMutation.mutate({ companyId, policy: parsed });
   }
-
-  const defaultExecutionPolicyDirty =
-    !!selectedCompany &&
-    defaultExecutionPolicyText.trim() !==
-      (selectedCompany.defaultExecutionPolicy
-        ? JSON.stringify(selectedCompany.defaultExecutionPolicy, null, 2)
-        : "");
 
   const syncLogoState = (nextLogoUrl: string | null) => {
     setLogoUrl(nextLogoUrl ?? "");
@@ -463,11 +472,14 @@ export function CompanySettings() {
             className="w-full min-h-32 rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm font-mono outline-none"
             placeholder={'{\n  "stages": [\n    { "type": "approval", "participants": [...] }\n  ]\n}'}
             value={defaultExecutionPolicyText}
-            onChange={(e) => setDefaultExecutionPolicyText(e.target.value)}
+            onChange={(e) => {
+              setDefaultExecutionPolicyText(e.target.value);
+              setDefaultExecutionPolicyDirty(true);
+            }}
             data-testid="company-settings-default-execution-policy-textarea"
           />
         </Field>
-        {defaultExecutionPolicyDirty && (
+        {!!selectedCompany && defaultExecutionPolicyDirty && (
           <div className="flex items-center gap-2">
             <Button
               size="sm"
