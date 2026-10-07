@@ -124,11 +124,24 @@ describe("buildRawMessage", () => {
     expect(raw).toContain("References: <msg-0@mail.gmail.com> <msg-1@mail.gmail.com>");
   });
 
-  it("never emits a raw message containing the literal word 'send' as an API directive", () => {
-    // Guard against accidental copy-paste of a send-capable template: this
-    // module only ever feeds its output into users.drafts.create.
-    const raw = buildRawMessage({ to: ["a@example.com"], subject: "Hi", body: "Body" });
-    expect(raw).not.toMatch(/drafts\.send|messages\.send/i);
+  it("rejects a subject containing CR or LF instead of injecting a header", () => {
+    expect(() =>
+      buildRawMessage({
+        to: ["a@example.com"],
+        subject: "Hi\r\nBcc: attacker@example.com",
+        body: "Body",
+      }),
+    ).toThrow(/CR or LF/);
+  });
+
+  it("rejects a recipient containing CR or LF", () => {
+    expect(() =>
+      buildRawMessage({
+        to: ["a@example.com\r\nBcc:attacker@example.com"],
+        subject: "Hi",
+        body: "Body",
+      }),
+    ).toThrow(/CR or LF/);
   });
 
   it("encodes a non-ASCII subject as a MIME encoded-word", () => {

@@ -100,6 +100,16 @@ export interface BuildRawMessageInput {
   references?: string | null;
 }
 
+// A CR or LF inside any header-bound value starts a new header line in the
+// raw RFC 2822 message, letting a subject like "Hi\r\nBcc: x@evil.com" add a
+// hidden recipient the caller never supplied. Reject rather than strip, so
+// the caller sees the problem instead of a silently mangled header.
+function assertNoHeaderInjection(fieldName: string, value: string): void {
+  if (/[\r\n]/.test(value)) {
+    throw new Error(`${fieldName} must not contain CR or LF characters`);
+  }
+}
+
 /**
  * Build an RFC 2822 message and base64url-encode it for the Gmail API's
  * `raw` field. Used only for draft creation (`users.drafts.create`) — this
@@ -107,6 +117,17 @@ export interface BuildRawMessageInput {
  * mutating/destructive Gmail endpoint.
  */
 export function buildRawMessage(input: BuildRawMessageInput): string {
+  assertNoHeaderInjection("subject", input.subject);
+  for (const recipient of [...input.to, ...(input.cc ?? []), ...(input.bcc ?? [])]) {
+    assertNoHeaderInjection("recipient", recipient);
+  }
+  if (input.inReplyToMessageId) {
+    assertNoHeaderInjection("inReplyToMessageId", input.inReplyToMessageId);
+  }
+  if (input.references) {
+    assertNoHeaderInjection("references", input.references);
+  }
+
   const lines: string[] = [];
   lines.push(`To: ${input.to.join(", ")}`);
   if (input.cc?.length) lines.push(`Cc: ${input.cc.join(", ")}`);
