@@ -188,6 +188,18 @@ Invariants:
 
 Invariant: plaintext key shown once at creation; only hash stored.
 
+### Agent cryptographic identity
+
+Each agent also has one Ed25519 identity in `agent_identity_keys`, separate from
+API bearer keys and company secrets. New-agent creation provisions it atomically;
+existing agents provision lazily before their first managed run. The schema-only
+migration and public reads never provision existing agents. Private PKCS#8 PEM
+material uses `local_encrypted`; public SPKI PEM and its SHA-256 key ID are readable
+through `GET /api/agents/:id/identity` and the agent Identity section. Managed
+processes receive the pair through runtime-only environment fields. See
+[Agent cryptographic identity](AGENT-IDENTITY.md) for storage, runtime, and copy
+semantics.
+
 ## 7.4 `goals`
 
 - `id` uuid pk
@@ -571,6 +583,18 @@ conversation lifecycles, and protection against replaying superseded requests.
 - Session-based auth for human operator
 - Board has full read/write across all companies in deployment
 - Every board mutation writes to `activity_log`
+
+Human invitations default to the Operator role. Its default grants allow agent
+creation and configuration, skill editing, environment management, invitations,
+task assignment, pipeline editing, connection and tool management/use, and tool
+and agent-action audit views. Operators do not receive `joins:approve` or
+`users:manage_permissions`. Explicit invitation grants remain authoritative.
+Creating a human invitation also requires any of these two membership powers
+included in its selected role. Operators can invite Operators and Viewers;
+inviting an Admin requires join approval, and inviting an Owner also requires
+member-permission management.
+This preset change adds no database migration; existing role-default seeding
+continues to insert missing grants without replacing custom scopes.
 
 ## 9.2 Agent Auth
 
@@ -1517,6 +1541,18 @@ the saved question. Questions do not contribute to composer pending counts.
 Dismissal persists locally for the person and task across reloads; reopening
 restores the original form and draft. Approval and permission gates are unchanged.
 
+A saved ordinary question becomes historical when a newer human task message
+moves it out of the current composer. Agent context, completion feedback, and
+native finalization apply the same rule. The historical question remains pending
+and answerable, including after completion; a later human answer records history
+without reopening the task or waking its agent. Its presence alone does not
+request another answer or prevent completion. Cancellation still expires pending
+questions. Agents continue work that does not need the missing input and withdraw
+obsolete questions when later evidence satisfies them. A real current input
+blocker must identify what is still needed. Approval, permission, connection,
+and configured review gates remain active. No server-side UI dismissal record
+is required.
+
 ## 15. Operational Requirements
 
 ## 15.1 Environment
@@ -1741,6 +1777,13 @@ Legacy agents retain their authentication until validated adoption. See
 [AI Connections](connections/AI-CONNECTIONS.md) for company isolation, compatible
 methods, lifecycle, runtime enforcement, and migration details.
 
+Missing personal AI credentials detected before adapter dispatch also produce
+the inline connection card. Every missing binding must belong to the same
+compatible AI provider. The responsible user connects their own account and
+explicitly adopts Connections; another user's onboarding key is never reused.
+Acceptance resumes only the matching configuration-blocked task through durable
+continuation delivery. Unrelated configuration gaps retain operator recovery.
+
 The selected AI connection supports an on-demand usage probe through the common
 connection service, independent of legacy/native execution. The board usage
 endpoint rechecks company membership and the credential's human audience before
@@ -1956,3 +1999,12 @@ and honor current ownership, review, governance, pause, dependency, budget, and
 cleanup gates. Restart or duplicate finalization must not create another
 successor. Permanent model/auth incompatibility and usage-limit exhaustion retain
 their existing operator recovery requirements.
+
+## Internal agent commentary
+
+`agent_commentary` stores company-scoped, attributed complaints and suggestions
+as free-form text in the instance database. Legacy agents use the default
+`complain` and `suggestion-box` runtime skills; native runs use dedicated tools
+in standard, ask, and planning modes. Submission never changes task disposition
+or routes feedback externally. See [Agent commentary](agent-commentary.md) for
+authentication, replay, document-sized limits, inspection, and deletion semantics.

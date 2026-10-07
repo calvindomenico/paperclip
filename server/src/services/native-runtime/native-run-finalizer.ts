@@ -1,3 +1,6 @@
+import { isNativePlanWaitResult, readNativePlanWait } from "./native-plan-wait.js";
+import { activeIssueInteractionCondition } from "../issue-question-context.js";
+import { hasPendingNativeChildCompletion } from "./native-child-completion-delivery.js";
 import { settleSlackConversation } from "../slack-conversation-lifecycle.js";
 import { executionFailureRetryCount } from "../execution-recovery-attempt.js";
 import { readPersistedNativeProviderFailure } from "./native-provider-failure-evidence.js";
@@ -148,18 +151,7 @@ export async function pendingNativeGovernance(input: {
           eq(issueThreadInteractions.companyId, input.companyId),
           eq(issueThreadInteractions.issueId, input.issueId),
           eq(issueThreadInteractions.status, "pending"),
-          // A previous chat turn's ordinary input remains answerable in history;
-          // it does not own the lifecycle of every subsequent reply. Current-turn
-          // requests, task execution, and governed approvals keep their gates.
-          isConversation(issue) ? sql`(
-            ${issueThreadInteractions.sourceRunId} is not distinct from ${input.runId}
-            or not (
-              ${issueThreadInteractions.kind} = 'ask_user_questions'
-              or (${issueThreadInteractions.kind} in ('request_confirmation', 'request_checkbox_confirmation')
-                and ${issueThreadInteractions.effectiveResolverPolicy} = 'anyone'
-                and not (${issueThreadInteractions.payload} ?| array['toolAction', 'secretProposal', 'connectionAuthorization']))
-            )
-          )` : undefined,
+          activeIssueInteractionCondition({ runId: input.runId, conversationMode: isConversation(issue) }),
         ),
       )
       .limit(1)
@@ -1277,6 +1269,15 @@ export async function finalizeNativeRun(input: {
       companyId: run.companyId, issueId: authoritativeIssue.id, agentId: run.agentId,
       contextSnapshot: reviewContext, allowResolvedByRunId: run.id,
     }) : null;
+    const planWait = isNativePlanWaitResult(result)
+      ? await readNativePlanWait(input.db, { companyId: run.companyId, issueId: authoritativeIssue.id, runId: run.id, agentId: run.agentId })
+      : null;
+    // Loss of the authority behind this server-issued wait must never fall
+    // through to the generic response_wake auto-continuation branch.
+    if (isNativePlanWaitResult(result) &&
+        (!planWait || nativeSha256(planWait.result) !== nativeSha256(result))) {
+      throw new Error("native_plan_wait_authority_lost");
+    }
     const providerFailure = await readPersistedNativeProviderFailure(
       input.db, run, resultRow.turnId, envelope.terminal as PrpTerminalState,
     );
@@ -1284,7 +1285,16 @@ export async function finalizeNativeRun(input: {
       (!authoritativeIssue.executionRunId || authoritativeIssue.executionRunId === run.id) &&
       (reviewContext ? nativeReview?.interaction.status === "pending"
         : authoritativeIssue.assigneeAgentId === run.agentId && !authoritativeIssue.assigneeUserId);
+    const childCompletionRecipient = {
+      companyId: run.companyId, issueId: authoritativeIssue.id, agentId: run.agentId, runId: run.id,
+      sourceIntentId: typeof record(run.contextSnapshot).nativeStatusWakeIntentId === "string"
+        ? record(run.contextSnapshot).nativeStatusWakeIntentId as string : null,
+    };
+    const hasPendingChildCompletion = !reviewContext &&
+      await hasPendingNativeChildCompletion(input.db, childCompletionRecipient);
     const proposedDecision = resolveNativeFinalizerStatus({
+      planWaitAuthorized: planWait !== null,
+      hasPendingChildCompletion,
       providerModelRejected: providerFailure?.errorCode === "native_provider_model_rejected" && ownsProviderFailureDecision,
       providerOverloaded: providerFailure?.errorCode === "native_provider_overloaded" && ownsProviderFailureDecision,
       providerFailureSuperseded: providerFailure?.errorCode === "native_provider_overloaded" && !ownsProviderFailureDecision,
@@ -1371,6 +1381,11 @@ export async function finalizeNativeRun(input: {
         priorStatusVersion: Number(authoritativeIssue.statusVersion),
         priorDecisionId: authoritativeIssue.lastStatusDecisionId,
         decision,
+        requirePlanWaitSource:
+          decision.reasonCode === "native_plan_accepted_waiting_for_continuation"
+            ? planWait?.source : undefined,
+        requireNoPendingChildCompletion: decision.statusAction === "done" && !reviewContext
+          ? childCompletionRecipient : undefined,
         requireModelRejectionOwner: decision.reasonCode === "native_provider_model_rejected"
           ? { agentId: run.agentId, reviewContext }
           : undefined,

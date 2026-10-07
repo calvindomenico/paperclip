@@ -1,5 +1,11 @@
 # Runner E2E fixture authoring
 
+## Connection creation fixtures
+
+See [PROVIDER-CONNECTIONS.md](PROVIDER-CONNECTIONS.md) for the explicit-only
+`provider-connections` suite, local/staging target ownership, dedicated browser
+profiles, credential handoffs, private evidence, and cleanup contract.
+
 The [public MCP journeys](PUBLIC-MCP.md) reuse the fixture registry with a real
 authenticated browser session. `RunnerApi.setBrowserSession` binds that session
 to API calls, including encrypted secret provisioning via Node fetch. OAuth
@@ -344,3 +350,12 @@ report matcher paths carry the dimension and private final evidence carries the
 explicit status. Provider runs are separately authorized; unit results establish
 oracle calibration only. See the [suite contract](README.md#production-hiring-templates)
 for evidence, budgets, cleanup and exact IDs.
+
+Cursor native denial qualification requires one exact absolute-target command, a
+correlated browser Reject once delivered after reconnect, six independent absence
+samples, a complete continuous mutation watcher, and retirement of the actual
+run-owned process tree. The pinned Cursor transport may report the rejected call
+as completed and end the native turn; Paperclip must retain a failed run with
+missing semantic finalization and an unfinished task. That is a denial outcome,
+not task success or operator cancellation. Stop during an unresolved permission
+remains a separate `native-active-stop/pending-permission-stop` gate.

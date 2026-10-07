@@ -9,8 +9,17 @@ export const mcpOauthClients = pgTable("mcp_oauth_clients", {
   name: text("name").notNull(),
   registrationSourceHash: text("registration_source_hash"),
   redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+  grantTypes: jsonb("grant_types").$type<string[]>().notNull().default(["authorization_code", "refresh_token"]),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Instance-level, short-lived admission receipts bound unauthenticated CIMD
+// network work across replicas. Failed lookups consume the same quota as success.
+export const mcpOauthMetadataAdmissions = pgTable("mcp_oauth_metadata_admissions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  sourceHash: text("source_hash").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+}, (t) => [index("mcp_oauth_metadata_admissions_expiry_idx").on(t.expiresAt)]);
 
 export const mcpOauthGrants = pgTable("mcp_oauth_grants", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -33,6 +42,8 @@ export const mcpOauthRequests = pgTable("mcp_oauth_requests", {
   scopes: jsonb("scopes").$type<string[]>().notNull(),
   state: text("state"),
   challenge: text("challenge").notNull(),
+  // A scope restriction, never authority. Retain it if the company is deleted.
+  requestedCompanyId: uuid("requested_company_id"),
   grantId: uuid("grant_id").references(() => mcpOauthGrants.id, { onDelete: "cascade" }),
   codeHash: text("code_hash"),
   decidedAt: timestamp("decided_at", { withTimezone: true }),
@@ -56,6 +67,27 @@ export const mcpOauthTokens = pgTable("mcp_oauth_tokens", {
   uniqueIndex("mcp_oauth_tokens_hash_uq").on(t.tokenHash),
   index("mcp_oauth_tokens_grant_idx").on(t.grantId),
   index("mcp_oauth_tokens_expiry_idx").on(t.expiresAt),
+]);
+
+export const mcpOauthDeviceRequests = pgTable("mcp_oauth_device_requests", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  clientId: text("client_id").notNull().references(() => mcpOauthClients.id, { onDelete: "cascade" }),
+  deviceCodeHash: text("device_code_hash").notNull(),
+  userCodeHash: text("user_code_hash").notNull(),
+  resource: text("resource").notNull(),
+  scopes: jsonb("scopes").$type<string[]>().notNull(),
+  requestedCompanyId: uuid("requested_company_id"),
+  sourceHash: text("source_hash").notNull(),
+  status: text("status").$type<"pending" | "approved" | "denied" | "consumed">().notNull().default("pending"),
+  grantId: uuid("grant_id").references(() => mcpOauthGrants.id, { onDelete: "cascade" }),
+  intervalSeconds: integer("interval_seconds").notNull().default(5),
+  nextPollAt: timestamp("next_poll_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("mcp_oauth_device_code_uq").on(t.deviceCodeHash),
+  uniqueIndex("mcp_oauth_user_code_uq").on(t.userCodeHash),
+  index("mcp_oauth_device_expiry_idx").on(t.expiresAt),
 ]);
 
 export const mcpMutationReceipts = pgTable("mcp_mutation_receipts", {
@@ -122,3 +154,37 @@ export const mcpEventDeliveries = pgTable("mcp_event_deliveries", {
   uniqueIndex("mcp_event_deliveries_activity_uq").on(t.subscriptionId, t.activityId),
   index("mcp_event_deliveries_due_idx").on(t.nextAttemptAt),
 ]);
+
+// Upload identities outlive their short-lived tickets so retries cannot duplicate files.
+export const mcpAttachmentUploads = pgTable("mcp_attachment_uploads", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => authUsers.id, { onDelete: "cascade" }),
+  requestId: uuid("request_id").notNull(),
+  taskId: uuid("task_id").notNull(),
+  argumentsHash: text("arguments_hash").notNull(),
+  originalFilename: text("original_filename").notNull(),
+  contentType: text("content_type").notNull(),
+  byteSize: integer("byte_size").notNull(),
+  sha256: text("sha256").notNull(),
+  attachmentId: uuid("attachment_id"),
+  // Allocated before storage writes, so a crash never loses cleanup provenance.
+  objectKey: text("object_key").notNull(),
+  storageProvider: text("storage_provider").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  cleanedAt: timestamp("cleaned_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("mcp_attachment_upload_request_uq").on(t.companyId, t.userId, t.requestId),
+  index("mcp_attachment_upload_expiry_idx").on(t.expiresAt),
+]);
+
+export const mcpFileTickets = pgTable("mcp_file_tickets", {
+  tokenHash: text("token_hash").primaryKey(),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  grantId: uuid("grant_id").notNull().references(() => mcpOauthGrants.id, { onDelete: "cascade" }),
+  uploadId: uuid("upload_id").references(() => mcpAttachmentUploads.id, { onDelete: "cascade" }),
+  attachmentId: uuid("attachment_id"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("mcp_file_ticket_expiry_idx").on(t.expiresAt), index("mcp_file_ticket_grant_idx").on(t.grantId)]);

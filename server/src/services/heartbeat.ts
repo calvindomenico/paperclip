@@ -1,8 +1,13 @@
+import { activeIssueInteractionCondition, TASK_QUESTION_GUIDANCE } from "./issue-question-context.js";
+import { createAgentIdentityRedactor } from "./agent-identity-redaction.js";
+import { agentIdentityService, supportsManagedAgentIdentity } from "./agent-identity.js";
+import { buildAgentIdentityEnv } from "@paperclipai/adapter-utils/server-utils";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { prepareConnectionInstructionDelivery } from "./connection-instructions.js";
 import { resolveAssignedConnectionInstructionsForRun } from "./native-runtime/assigned-mcp-tools.js";
 import { externalObjectService } from "./external-objects.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
+import { nativeRetryCancellationCommitCondition, rethrowNativeCancellationLockConflict, claimCancellationRequest, startupCancellationFence } from "./native-runtime/native-cancellation-request.js";
 import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn, chatCompletionInstruction, isCompletedOnboardingHandoffWake } from "./chat-completion-delivery.js";
 import { AgentDirectoryReuseInvalidatedError, isAgentDirectoryCopy } from "./agent-directory-working-copies.js";
 
@@ -1487,6 +1492,7 @@ const LOW_TRUST_SENSITIVE_ENV_KEY_RE =
 // 3. Any other PAPERCLIP_*-named binding is user data and flows through to
 //    the run env like any non-prefixed binding.
 const FORBIDDEN_ENV_BINDING_KEYS = new Set([
+  "PAPERCLIP_AGENT_KEY_ID", "PAPERCLIP_AGENT_PUBLIC_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY",
   "PAPERCLIP_RUNNER_NETWORK_ACCESS",
   "PAPERCLIP_RUNNER_NETWORK_ROOTS",
   "PAPERCLIP_API_KEY",
@@ -1514,7 +1520,7 @@ function stripForbiddenEnvBindings(
   const filtered = Object.fromEntries(
     Object.entries(record).filter(
       ([key]) =>
-        !FORBIDDEN_ENV_BINDING_KEYS.has(key) &&
+        !FORBIDDEN_ENV_BINDING_KEYS.has(key.toUpperCase()) &&
         !(managedGitHubCredentials && MANAGED_GITHUB_TOKEN_KEYS.has(key)),
     ),
   );
@@ -6579,6 +6585,7 @@ function buildSessionConfigCategoryValues(input: {
   secretManifest: readonly EffectiveRunConfigSecretManifestEntry[];
   runtimeSkills: unknown;
   agentConfigRevision: unknown;
+  agentIdentityKeyId?: string;
 }) {
   const sanitizedSecretManifest = sanitizeSecretManifestForConfigFingerprint(
     input.secretManifest,
@@ -6600,6 +6607,7 @@ function buildSessionConfigCategoryValues(input: {
   return {
     adapter: {
       adapterType: input.adapterType,
+      ...(input.agentIdentityKeyId ? { agentIdentityKeyId: input.agentIdentityKeyId } : {}),
       agentConfigRevision: input.agentConfigRevision,
     },
     adapterConfig: input.effectiveAdapterConfig,
@@ -6632,6 +6640,7 @@ export async function buildEffectiveRunSessionConfigMetadata(input: {
   secretManifest?: readonly EffectiveRunConfigSecretManifestEntry[];
   runtimeSkills: unknown;
   agentConfigRevision?: unknown;
+  agentIdentityKeyId?: string;
 }): Promise<EffectiveRunSessionConfigMetadata> {
   const secretManifest = input.secretManifest ?? [];
   const instructions = await resolveInstructionsConfigFingerprintMetadata(
@@ -6651,6 +6660,7 @@ export async function buildEffectiveRunSessionConfigMetadata(input: {
     secretManifest,
     runtimeSkills: input.runtimeSkills,
     agentConfigRevision: input.agentConfigRevision ?? null,
+    agentIdentityKeyId: input.agentIdentityKeyId,
   });
   const fingerprints = createEffectiveRunConfigFingerprints({
     session: categoryValues,
@@ -7104,7 +7114,11 @@ export function shouldQueueFollowupForRunningIssueWake(input: {
     return true;
   }
   const wakeReason = readNonEmptyString(input.contextSnapshot?.wakeReason);
-  if (wakeReason === "issue_children_completed" && input.contextSnapshot?.onboardingCompletion === true) return true;
+  if (wakeReason === "issue_children_completed" && (
+    input.contextSnapshot?.onboardingCompletion === true ||
+    (input.contextSnapshot?.statusDecisionSource === "native_status_decision" &&
+      readNonEmptyString(input.contextSnapshot?.nativeChildCompletionDecisionId))
+  )) return true;
   return Boolean(
     wakeReason && RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP.has(wakeReason),
   );
@@ -8830,6 +8844,7 @@ export function buildPaperclipTaskMarkdown(input: {
     }
   };
   if (issue) {
+    lines.push("", "Task question guidance:", TASK_QUESTION_GUIDANCE);
     lines.push(
       `- Issue: ${quoteTaskScalar(issue.identifier || issue.id)}`,
       `- Title: ${quoteTaskScalar(issue.title)}`,
@@ -9450,10 +9465,11 @@ export async function cancelHeartbeatNativeRun(input: {
   runId: string;
   reason: string;
   runtimeMode: string | null;
+  cancellationRequestId?: string;
   cancel?: (
     runId: string,
     reason: string,
-    options: { db: Db; scope: "run" },
+    options: { db: Db; scope: "run"; cancellationRequestId?: string },
   ) => Promise<{ decision: unknown | null; auditId: string | null }>;
 }) {
   if (input.runtimeMode !== "native") {
@@ -9463,10 +9479,12 @@ export async function cancelHeartbeatNativeRun(input: {
     ? await input.cancel(input.runId, input.reason, {
         db: input.db,
         scope: "run",
+        ...(input.cancellationRequestId ? { cancellationRequestId: input.cancellationRequestId } : {}),
       })
     : await cancelNativeSession(input.runId, input.reason, {
         db: input.db,
         scope: "run",
+        ...(input.cancellationRequestId ? { cancellationRequestId: input.cancellationRequestId } : {}),
       });
   if (!cancellation.decision || !cancellation.auditId) {
     throw new Error("native_cancellation_outcome_not_audited");
@@ -12239,6 +12257,10 @@ export function heartbeatService(
         ? await getOldestRunForSession(agent.id, sessionId)
         : (runs[runs.length - 1] ?? latestRun);
     const latestRawUsage = readRawUsageTotals(latestRun?.usageJson);
+    // Historical Codex/Gemini raw input includes cache reads. Only add the
+    // separate cache counter when the writer explicitly saved exclusive input.
+    const latestRawInputTokens = (latestRawUsage?.inputTokens ?? 0) +
+      (latestRun?.usageJson?.rawInputIncludesCached === false ? latestRawUsage?.cachedInputTokens ?? 0 : 0);
     const sessionAgeHours =
       latestRun && oldestRun
         ? Math.max(
@@ -12255,10 +12277,10 @@ export function heartbeatService(
     } else if (
       policy.maxRawInputTokens > 0 &&
       latestRawUsage &&
-      latestRawUsage.inputTokens >= policy.maxRawInputTokens
+      latestRawInputTokens >= policy.maxRawInputTokens
     ) {
       reason =
-        `session raw input reached ${formatCount(latestRawUsage.inputTokens)} tokens ` +
+        `session raw input reached ${formatCount(latestRawInputTokens)} tokens ` +
         `(threshold ${formatCount(policy.maxRawInputTokens)})`;
     } else if (
       policy.maxSessionAgeHours > 0 &&
@@ -13006,6 +13028,7 @@ export function heartbeatService(
     fromStatuses: string[],
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
     failureReport?: RunFailureReportOptions,
+    cancellationCondition?: ReturnType<typeof nativeRetryCancellationCommitCondition>,
   ) {
     // fromStatuses can name a terminal status as its own source (for example,
     // an idempotent "still failed" patch), so the write below is not always a
@@ -13064,13 +13087,18 @@ export function heartbeatService(
               and(
                 eq(heartbeatRuns.id, runId),
                 inArray(heartbeatRuns.status, fromStatuses),
+                ...(cancellationCondition ? [cancellationCondition] : []),
                 ...(isHeartbeatRunTerminalStatus(status)
                   ? [nativeRunnerOwnershipNotHeldCondition()]
                   : []),
               ),
             )
             .returning()
-            .then((rows) => rows[0] ?? null);
+            .then((rows) => rows[0] ?? null)
+            .catch((error: unknown) => {
+              if (cancellationCondition) rethrowNativeCancellationLockConflict(error);
+              throw error;
+            });
 
     if (updated) {
       publishLiveEvent({
@@ -13625,6 +13653,7 @@ export function heartbeatService(
                 eq(issueThreadInteractions.companyId, issue.companyId),
                 eq(issueThreadInteractions.issueId, issue.id),
                 eq(issueThreadInteractions.status, "pending"),
+                activeIssueInteractionCondition(),
               ),
             )
             .limit(1)
@@ -19243,8 +19272,8 @@ export function heartbeatService(
     );
 
     // A terminal issue transition writes this intent in the same transaction
-    // that expires the native question. Consume it before generic orphan
-    // recovery so a restart preserves the requested cancellation outcome.
+    // that closes the question's task, even when its card is retained. Consume
+    // it before generic orphan recovery so a restart preserves cancellation.
     const cancellationRequests = await db
       .select({
         id: heartbeatRuns.id,
@@ -20532,6 +20561,7 @@ export function heartbeatService(
     > | null = null;
     let providerTraceFinalized = false;
     let readFailureReportSecrets: () => string[] = () => [];
+    let identityRedactor = createAgentIdentityRedactor();
 
     try {
       let agent = await getAgent(run.agentId);
@@ -21870,9 +21900,15 @@ export function heartbeatService(
         resolve: () => resolveAssignedConnectionInstructionsForRun(db, { companyId: agent.companyId, agentId: agent.id, runId: run.id }),
         context, config: connectorDelivery.config, native: agent.adapterType === "paperclip_runner",
       });
+      const agentIdentity = supportsManagedAgentIdentity(agent.adapterType, agent.adapterConfig, run.runtimeMode === "native" ? run.driverKind : undefined)
+        ? await agentIdentityService(db).ensureAgentIdentity(agent.companyId, agent.id)
+        : undefined;
+      identityRedactor = createAgentIdentityRedactor(agentIdentity?.privateKeyPem);
+      if (agentIdentity) secretKeys.add("PAPERCLIP_AGENT_PRIVATE_KEY");
       const resolvedFailureSecrets = readFailureReportSecrets();
       readFailureReportSecrets = () => [
         ...resolvedFailureSecrets,
+        ...identityRedactor.values,
         ...collectRunFailureSecretValues(runtimeConfig.env, secretKeys),
       ];
       const latestAgentConfigRevision = await getLatestAgentConfigRevision(
@@ -21880,6 +21916,7 @@ export function heartbeatService(
         agent.id,
       );
       const sessionConfigMetadataInput = {
+          agentIdentityKeyId: agentIdentity?.keyId,
           adapterType: agent.adapterType,
           effectiveAdapterConfig: runtimeConfig,
           managedAiHome: managedAiRuntime?.home,
@@ -21978,7 +22015,7 @@ export function heartbeatService(
         compatibleConfigMetadata,
         wakeResetReason: wakeSessionResetReason,
         preserveLegacySessionWithoutConfigMetadata:
-          acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision,
+          acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision && !agentIdentity,
       });
       const resetTaskSession =
         shouldResetTaskSessionForWake(context) || sessionConfigFreshness.reset;
@@ -23430,7 +23467,7 @@ export function heartbeatService(
 
         const currentUserRedactionOptions =
           await getCurrentUserRedactionOptions();
-        const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        const appendIdentityRedactedLog = async (stream: "stdout" | "stderr", chunk: string) => {
           const sanitizedChunk = compactRunLogChunk(
             redactCurrentUserText(chunk, currentUserRedactionOptions),
           );
@@ -23505,6 +23542,8 @@ export function heartbeatService(
             },
           });
         };
+        const onLog = (stream: "stdout" | "stderr", chunk: string) =>
+          appendIdentityRedactedLog(stream, identityRedactor.chunk(stream, chunk));
         if (runScopedMentionedSkillKeys.length > 0) {
           await onLog(
             "stdout",
@@ -23593,6 +23632,7 @@ export function heartbeatService(
           }
         }
         const onAdapterMeta = async (meta: AdapterInvocationMeta) => {
+          meta = identityRedactor.redact(meta);
           if (meta.env && secretKeys.size > 0) {
             for (const key of secretKeys) {
               if (key in meta.env) meta.env[key] = "***REDACTED***";
@@ -23608,6 +23648,7 @@ export function heartbeatService(
         };
 
         const onAdapterEvent = async (event: AdapterRuntimeEvent) => {
+          event = identityRedactor.redact(event);
           const eventType = event.eventType.trim();
           if (!eventType) return;
           await appendRunEvent(currentRun, {
@@ -23674,7 +23715,8 @@ export function heartbeatService(
             const savedFileInput = parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
             const priorFileInput = Object.keys(savedFileInput).length ? savedFileInput : parseObject(parseObject(priorFileRun?.profile).nativeExecutionInput);
             const priorWorkingCopy = parseObject(parseObject(parseObject(priorFileInput.runtimeContext).instructions).workingCopy);
-            const warmFiles = nativeRuntimeResolution.kind === "native" && nativeRuntimeResolution.profile.backend === "codex_app_server" &&
+            const warmFiles = nativeRuntimeResolution.kind === "native" && (nativeRuntimeResolution.profile.backend === "codex_app_server" ||
+              (nativeRuntimeResolution.profile.backend === "acpx_runtime" && parseObject(agent.adapterConfig).acpxAgent === "cursor")) &&
               (executionTarget?.kind === "remote" && executionTarget.transport === "sandbox"
                 ? executionTarget.runnerLifecyclePolicy?.mode === "warm"
                 : parseObject(agent.adapterConfig).lifecycleMode === "warm");
@@ -24176,6 +24218,7 @@ export function heartbeatService(
             getNativeFreshSessionHandoff = nativeReviewRequest ? undefined : getFreshSessionHandoff;
             const buildExecution = ({ normalizedSessionId, resumedSession }: { normalizedSessionId: string; resumedSession: boolean }) =>
                   buildNativeExecutionInput({
+                    agentKeyId: agentIdentity?.keyId,
                     companyId: agent.companyId,
                     runId: run.id,
                     issue: nativeReviewRequest ? { ...issueRef, title: `Review: ${issueRef.title}`, description: nativeReviewRequest } : issueRef,
@@ -24255,6 +24298,7 @@ export function heartbeatService(
                             nativeRuntimeResolution.profile.backend,
                             agent.adapterConfig,
                             issueAssigneeOverrides?.adapterConfig,
+                            managedAiRuntime ? readNonEmptyString(resolvedConfig.model) ?? undefined : undefined,
                           )
                         : agent.adapterConfig,
                       managedProfile,
@@ -24909,6 +24953,7 @@ export function heartbeatService(
                         process.env,
                         executionWorkspace.cwd,
                       ),
+                      ...buildAgentIdentityEnv(agentIdentity),
                       ...(instructionCopy && isAgentDirectoryCopy(instructionCopy) ? { AGENT_HOME: instructionCopy.executionRoot } : {}),
                       ...(nativeMcpServer
                         ? {
@@ -25065,6 +25110,7 @@ export function heartbeatService(
                   legacyAdapterEntered = true;
                   return withAdapterExecutionPhase(executionPhaseContext, "adapter_execution", () => adapter.execute({
                     getFreshSessionHandoff,
+                    agentIdentity,
                     runId: run.id,
                     agent,
                     runtime: runtimeForAdapter,
@@ -25145,6 +25191,11 @@ export function heartbeatService(
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
           }
+          adapterResult = identityRedactor.redact(adapterResult);
+          for (const stream of ["stdout", "stderr"] as const) {
+            const tail = identityRedactor.finish(stream);
+            if (tail) await appendIdentityRedactedLog(stream, tail);
+          }
           if (instructionSave) adapterResult.resultJson = { ...adapterResult.resultJson, instructionSave };
           adapterResult = applyWorkspaceRestoreFailure(adapterResult);
           // A returned result can include a failed restore. Keep the workspace
@@ -25219,6 +25270,11 @@ export function heartbeatService(
             await completeWorkspace();
           }
         } catch (adapterErr) {
+          if (adapterErr instanceof NativeCancellationPendingRecoveryError) {
+            // Durable cancellation is settled by the outer recovery handler;
+            // it does not imply a failed workspace or a persisted run result.
+            throw adapterErr;
+          }
           if (adapterErr instanceof NativeWorkspaceFinalizationBusyError
             || adapterErr instanceof NativeWorkspaceFinalizationOwnershipLostError) {
             nativeWorkspaceFinalizeScheduled = true;
@@ -25591,6 +25647,7 @@ export function heartbeatService(
                 ...(rawUsage
                   ? {
                       rawInputTokens: rawUsage.inputTokens,
+                      rawInputIncludesCached: false,
                       rawCachedInputTokens: rawUsage.cachedInputTokens,
                       rawOutputTokens: rawUsage.outputTokens,
                     }
@@ -26223,7 +26280,7 @@ export function heartbeatService(
         // child. Let the cancellation write settle before attempting failure.
         await processRunCancellationSettlements.get(run.id)?.settled;
         const message = redactCurrentUserText(
-          err instanceof Error ? err.message : "Unknown adapter failure",
+          identityRedactor.redact(err instanceof Error ? err.message : "Unknown adapter failure"),
           await getCurrentUserRedactionOptions(),
         );
         const workspaceValidationFailure = isWorkspaceValidationFailure(err)
@@ -26266,7 +26323,7 @@ export function heartbeatService(
           recordedResponsibleUserDenialCode ??
           nativeTerminalFailureCode ??
           "adapter_failed";
-        logger.error({ err, runId }, "heartbeat execution failed");
+        logger.error({ err: identityRedactor.redact({ message: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined }), runId }, "heartbeat execution failed");
 
         let logSummary: {
           bytes: number | null;
@@ -26480,9 +26537,9 @@ export function heartbeatService(
         // Setup code before adapter.execute threw (e.g. ensureRuntimeState, resolveWorkspaceForRun).
         // The inner catch did not fire, so we must record the failure here.
         const message = redactCurrentUserText(
-          outerErr instanceof Error
+          identityRedactor.redact(outerErr instanceof Error
             ? outerErr.message
-            : "Unknown setup failure",
+            : "Unknown setup failure"),
           await getCurrentUserRedactionOptions(),
         );
         // A missing secret/env binding is a known pre-dispatch configuration gap,
@@ -26526,7 +26583,7 @@ export function heartbeatService(
           nonRetryablePreflightCode ??
           "setup_failed";
         logger.error(
-          { err: outerErr, runId },
+          { err: identityRedactor.redact({ message: outerErr instanceof Error ? outerErr.message : String(outerErr), stack: outerErr instanceof Error ? outerErr.stack : undefined }), runId },
           "heartbeat execution setup failed",
         );
         const setupFailureAgent = await getAgent(run.agentId).catch(() => null);
@@ -29584,6 +29641,9 @@ export function heartbeatService(
   }
 
   type CancelRunOptions = {
+    /** Optional board request identity, atomically reserved for native Stop. */
+    cancellationRequestId?: string;
+    cancellationRequestedByUserId?: string | null;
     errorCode?: string;
     resultJson?: Record<string, unknown>;
     eventMessage?: string;
@@ -29612,20 +29672,27 @@ export function heartbeatService(
   ) {
     let run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
+    if (options.cancellationRequestId) {
+      run = await claimCancellationRequest(db, runId, run.companyId, options.cancellationRequestId, options.cancellationRequestedByUserId ?? null);
+    }
+    // The caller claim checked retry eligibility under both durable row locks.
+    // This is only a cancellation candidate: dispatch rechecks the coordinator
+    // under lock, and the final CAS requires its own unchanged acknowledged
+    // retry fence. Re-reading only retryable_failure here would strand replay.
     const pendingNativeRetry =
-      run.runtimeMode === "native" && run.status === "failed"
-        ? await db
-            .select({ runId: nativeRunFinalizations.runId })
-            .from(nativeRunFinalizations)
-            .where(
-              and(
-                eq(nativeRunFinalizations.runId, run.id),
-                eq(nativeRunFinalizations.companyId, run.companyId),
-                eq(nativeRunFinalizations.phase, "retryable_failure"),
-              ),
-            )
-            .then((rows) => rows.length > 0)
-        : false;
+      run.runtimeMode === "native" && run.status === "failed" && (
+        Boolean(options.cancellationRequestId) || await db
+          .select({ runId: nativeRunFinalizations.runId })
+          .from(nativeRunFinalizations)
+          .where(
+            and(
+              eq(nativeRunFinalizations.runId, run.id),
+              eq(nativeRunFinalizations.companyId, run.companyId),
+              eq(nativeRunFinalizations.phase, "retryable_failure"),
+            ),
+          )
+          .then((rows) => rows.length > 0)
+      );
     if (
       !pendingNativeRetry &&
       !CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(
@@ -29658,7 +29725,7 @@ export function heartbeatService(
     // Established legacy processes must still be stopped if the database is
     // unavailable. Only native or not-yet-dispatched preparation needs this
     // additional durable fence before its existing cancellation path.
-    if (run.runtimeMode === "native" || (!run.runtimeModeResolvedAt && !running && !control)) {
+    if (!options.cancellationRequestId && (run.runtimeMode === "native" || (!run.runtimeModeResolvedAt && !running && !control))) {
       const [fenced] = await db.update(heartbeatRuns).set({
         // Record handoff intent before native cancellation can finalize and release
         // the run. Only its audited stop acknowledgement suppresses recovery.
@@ -29748,6 +29815,7 @@ export function heartbeatService(
               runId: run.id,
               reason,
               runtimeMode: run.runtimeMode,
+              ...(options.cancellationRequestId ? { cancellationRequestId: options.cancellationRequestId } : {}),
             });
             if (running) {
               await terminateHeartbeatRunProcess({
@@ -29850,6 +29918,8 @@ export function heartbeatService(
                   }
                 : {}),
             },
+            undefined,
+            pendingNativeRetry ? nativeRetryCancellationCommitCondition(persistedCancellationResult) : undefined,
           );
         } catch (error) {
           if (processCancellationSettlement) {
