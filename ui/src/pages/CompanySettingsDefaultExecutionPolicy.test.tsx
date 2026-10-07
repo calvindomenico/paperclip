@@ -148,20 +148,9 @@ describe("CompanySettings default execution policy draft", () => {
   let container: HTMLDivElement;
   let root: ReturnType<typeof createRoot>;
   let queryClient: QueryClient;
+  let CompanySettings: Awaited<typeof import("./CompanySettings")>["CompanySettings"];
 
-  beforeEach(async () => {
-    selectedCompany = { ...baseCompany };
-    mockCompaniesApi.update.mockReset();
-    mockCompaniesApi.putDefaultExecutionPolicy.mockReset();
-    mockCompaniesApi.update.mockResolvedValue(selectedCompany);
-
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-
-    const { CompanySettings } = await import("./CompanySettings");
-
-    root = createRoot(container);
+  async function renderApp() {
     await act(async () => {
       root.render(
         <QueryClientProvider client={queryClient}>
@@ -174,6 +163,22 @@ describe("CompanySettings default execution policy draft", () => {
       );
     });
     await flushReact();
+  }
+
+  beforeEach(async () => {
+    selectedCompany = { ...baseCompany };
+    mockCompaniesApi.update.mockReset();
+    mockCompaniesApi.putDefaultExecutionPolicy.mockReset();
+    mockCompaniesApi.update.mockResolvedValue(selectedCompany);
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    ({ CompanySettings } = await import("./CompanySettings"));
+
+    root = createRoot(container);
+    await renderApp();
   });
 
   afterEach(async () => {
@@ -197,6 +202,24 @@ describe("CompanySettings default execution policy draft", () => {
     await flushReact();
 
     // The policy keystroke must not have reset the still-unsaved name edit.
+    expect(getNameInput(container).value).toBe("Renamed Co");
+  });
+
+  it("does not discard an unsaved organization name edit when an unrelated refetch replaces selectedCompany with a new, unchanged-looking object", async () => {
+    // Saving the policy draft calls invalidateQueries on queryKeys.companies.all,
+    // which refetches the company list and hands CompanyContext a brand new
+    // selectedCompany object -- same name/description values, but a new
+    // reference -- even though only defaultExecutionPolicy changed. The
+    // general-fields sync effect must not treat that reference change alone
+    // as a reason to re-copy name/description over an unsaved edit.
+    const nameInput = getNameInput(container);
+    setInputValue(nameInput, "Renamed Co");
+    await flushReact();
+    expect(nameInput.value).toBe("Renamed Co");
+
+    selectedCompany = { ...baseCompany };
+    await renderApp();
+
     expect(getNameInput(container).value).toBe("Renamed Co");
   });
 

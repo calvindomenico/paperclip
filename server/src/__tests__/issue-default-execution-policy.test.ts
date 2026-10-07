@@ -441,6 +441,64 @@ describeEmbeddedPostgres("company/project default execution policy", () => {
     expect(res.body.assigneeAgentId).toBe(assignee.id);
   });
 
+  it("drops the company default's monitor, without a 422, on a watchdog follow-up child forced to blocked for serialization", async () => {
+    const company = await seedCompany();
+    const creator = await seedAgentRow(company.id);
+    await db
+      .update(companies)
+      .set({
+        defaultExecutionPolicy: {
+          mode: "normal",
+          commentRequired: true,
+          stages: [],
+          monitor: { nextCheckAt: new Date(Date.now() + 60_000).toISOString() },
+        } as never,
+      })
+      .where(eq(companies.id, company.id));
+
+    // A watchdog-parent issue with an already-running child forces any new
+    // child to "blocked" (one lane at a time), regardless of what status the
+    // create request asked for. The inherited-monitor check must see that
+    // final "blocked" status, not the "in_progress" the request named --
+    // otherwise it authorizes a monitor for a status buildInitialIssueMonitorFields
+    // then 422s.
+    const watchdogParent = await db
+      .insert(issues)
+      .values({
+        companyId: company.id,
+        identifier: `${company.issuePrefix}-1`,
+        issueNumber: 1,
+        title: "Watchdog parent",
+        status: "in_progress",
+        priority: "medium",
+        originKind: "task_watchdog",
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    await db.insert(issues).values({
+      companyId: company.id,
+      identifier: `${company.issuePrefix}-2`,
+      issueNumber: 2,
+      title: "Currently serialized watchdog child",
+      status: "in_progress",
+      priority: "medium",
+      parentId: watchdogParent.id,
+    });
+
+    const res = await request(app(agentActor(creator.id, company.id)))
+      .post(`/api/issues/${watchdogParent.id}/children`)
+      .send({
+        title: "Next watchdog follow-up, picks up company default",
+        assigneeAgentId: creator.id,
+        status: "in_progress",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.status).toBe("blocked");
+    expect(res.body.executionPolicy?.monitor ?? null).toBeNull();
+    expect(res.body.assigneeAgentId).toBe(creator.id);
+  });
+
   it("still rejects an agent that explicitly sets a monitor on a task it isn't assigned", async () => {
     const company = await seedCompany();
     const agent = await seedAgentRow(company.id);

@@ -81,18 +81,39 @@ export function CompanySettings() {
   const [defaultExecutionPolicySyncedCompanyId, setDefaultExecutionPolicySyncedCompanyId] =
     useState<string | null>(null);
 
+  // Which company's name/description/logo/governance are currently loaded
+  // into local state. selectedCompany's object identity changes on every
+  // refetch of the company list -- including one triggered by saving the
+  // unrelated defaultExecutionPolicy draft below (its onSuccess calls
+  // invalidateQueries) -- not just when the user switches companies. Without
+  // this, any such refetch would re-run the sync effect and stomp an
+  // unsaved name/description edit even though nothing the user typed here
+  // caused it.
+  const [generalSyncedCompanyId, setGeneralSyncedCompanyId] = useState<
+    string | null
+  >(null);
+
+  const generalDirty =
+    !!selectedCompany &&
+    (companyName !== selectedCompany.name ||
+      description !== (selectedCompany.description ?? ""));
+
   // Sync general (name/description/logo/governance) local state from the
-  // selected company. Deliberately does NOT depend on
-  // defaultExecutionPolicyDirty -- it must not rerun (and clobber unsaved
-  // name/description edits) just because the user typed in the unrelated
-  // policy textarea below.
+  // selected company. Refresh on a company switch (even if the outgoing
+  // draft was dirty), or whenever the draft is clean -- so an external
+  // update (e.g. the policy save's refetch above) is reflected. Never
+  // overwrite a dirty, same-company draft.
   useEffect(() => {
     if (!selectedCompany) return;
-    setCompanyName(selectedCompany.name);
-    setDescription(selectedCompany.description ?? "");
-    setLogoUrl(selectedCompany.logoUrl ?? "");
-    setGovernance(selectedCompany.interactionResolverGovernance ?? {});
-  }, [selectedCompany]);
+    const companyChanged = selectedCompany.id !== generalSyncedCompanyId;
+    if (companyChanged || !generalDirty) {
+      setCompanyName(selectedCompany.name);
+      setDescription(selectedCompany.description ?? "");
+      setLogoUrl(selectedCompany.logoUrl ?? "");
+      setGovernance(selectedCompany.interactionResolverGovernance ?? {});
+      setGeneralSyncedCompanyId(selectedCompany.id);
+    }
+  }, [selectedCompany, generalSyncedCompanyId, generalDirty]);
 
   // Sync the default execution policy draft from the selected company.
   useEffect(() => {
@@ -113,11 +134,6 @@ export function CompanySettings() {
       setDefaultExecutionPolicySyncedCompanyId(selectedCompany.id);
     }
   }, [selectedCompany, defaultExecutionPolicySyncedCompanyId, defaultExecutionPolicyDirty]);
-
-  const generalDirty =
-    !!selectedCompany &&
-    (companyName !== selectedCompany.name ||
-      description !== (selectedCompany.description ?? ""));
 
   const generalMutation = useMutation({
     mutationFn: (data: {

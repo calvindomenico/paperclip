@@ -12263,13 +12263,18 @@ export function issueRoutes(
           childAssignmentScope.projectId,
           createBody.executionPolicy,
         );
+      // Serialized watchdog follow-ups get forced to "blocked" below
+      // (svc.createChild's currentSerializedChild spread), after this
+      // monitor check already ran on the originally requested status.
+      // Use the status the issue will actually end up with so the
+      // monitor isn't authorized for a status it can no longer hold.
       const authorizedExecutionPolicy = await withAuthorizedInheritedMonitor(
         access,
         req,
         parent.companyId,
         createBody.assigneeAgentId ?? null,
         createBody.assigneeUserId ?? null,
-        createBody.status,
+        currentSerializedChild ? "blocked" : createBody.status,
         resolvedExecutionPolicy,
         monitorFromRequest,
       );
@@ -12498,8 +12503,26 @@ export function issueRoutes(
       }
 
       const actor = getActorInfo(req);
+      // Computed before the loop below (not just for the post-loop
+      // status-override pass) so the per-child monitor check can see
+      // whether watchdog serialization will force this child to
+      // "blocked" before it ever reaches buildInitialIssueMonitorFields.
+      const serializationContext =
+        await resolveWatchdogFollowUpSerializationContext(req, sourceIssue);
+      const existingSerializedChild = serializationContext
+        ? await findCurrentSerializedWatchdogChild(sourceIssue)
+        : null;
       const normalizedChildren = [];
       for (const child of requestedChildren) {
+        const index = normalizedChildren.length;
+        // Mirrors the status-override pass below: index 0 is only forced
+        // to "blocked" if a watchdog child is already serialized; every
+        // later child always chains onto the previous one.
+        const willBeSerializedBlocked = serializationContext
+          ? index === 0
+            ? Boolean(existingSerializedChild)
+            : true
+          : false;
         let resolvedExecutionPolicy = normalizeIssueExecutionPolicy(
           child.executionPolicy,
         );
@@ -12527,7 +12550,7 @@ export function issueRoutes(
           sourceIssue.companyId,
           child.assigneeAgentId ?? null,
           child.assigneeUserId ?? null,
-          child.status,
+          willBeSerializedBlocked ? "blocked" : child.status,
           resolvedExecutionPolicy,
           monitorFromRequest,
         );
@@ -12566,11 +12589,6 @@ export function issueRoutes(
           actorUserId: actor.actorType === "user" ? actor.actorId : null,
         });
       }
-      const serializationContext =
-        await resolveWatchdogFollowUpSerializationContext(req, sourceIssue);
-      const existingSerializedChild = serializationContext
-        ? await findCurrentSerializedWatchdogChild(sourceIssue)
-        : null;
       const serializedBlockedChildIds = new Set<string>();
       if (serializationContext) {
         for (let index = 0; index < normalizedChildren.length; index += 1) {
