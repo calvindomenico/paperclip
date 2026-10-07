@@ -5,6 +5,17 @@ function encode(text: string): string {
   return Buffer.from(text, "utf8").toString("base64url");
 }
 
+function encodeLatin1(text: string): string {
+  return Buffer.from(text, "latin1").toString("base64url");
+}
+
+// Mirrors how a real MIME client would read buildRawMessage's output: split
+// headers from body, then decode the body per the declared transfer encoding.
+function decodeMimeBody(rawMessage: string): string {
+  const body = rawMessage.split("\r\n\r\n").slice(1).join("\r\n\r\n");
+  return Buffer.from(body.replace(/\r\n/g, ""), "base64").toString("utf8");
+}
+
 describe("getHeader", () => {
   it("is case-insensitive", () => {
     const headers = [{ name: "Subject", value: "Hello" }];
@@ -83,11 +94,55 @@ describe("extractMessageBody", () => {
     expect(result.text).toBe("");
     expect(result.truncated).toBe(false);
   });
+
+  it("does not let a text/plain attachment replace an HTML-only message's body", () => {
+    const result = extractMessageBody({
+      mimeType: "multipart/mixed",
+      parts: [
+        { mimeType: "text/html", body: { data: encode("<p>the real message</p>") } },
+        {
+          mimeType: "text/plain",
+          filename: "notes.txt",
+          body: { data: encode("attachment contents, not the message") },
+        },
+      ],
+    });
+    expect(result.text).toContain("the real message");
+    expect(result.attachmentFilenames).toEqual(["notes.txt"]);
+  });
+
+  it("excludes a forwarded message attachment's nested parts from the body too", () => {
+    const result = extractMessageBody({
+      mimeType: "multipart/mixed",
+      parts: [
+        { mimeType: "text/plain", body: { data: encode("top-level reply") } },
+        {
+          mimeType: "message/rfc822",
+          filename: "forwarded.eml",
+          parts: [{ mimeType: "text/plain", body: { data: encode("forwarded body, not the reply") } }],
+        },
+      ],
+    });
+    expect(result.text).toBe("top-level reply");
+  });
 });
 
 describe("decodeBase64Url", () => {
   it("round-trips UTF-8 text", () => {
     expect(decodeBase64Url(encode("héllo wörld"))).toBe("héllo wörld");
+  });
+
+  it("decodes a declared ISO-8859-1 part using that charset instead of UTF-8", () => {
+    expect(decodeBase64Url(encodeLatin1("café"), "ISO-8859-1")).toBe("café");
+  });
+
+  it("extractMessageBody honors a part's own charset header", () => {
+    const result = extractMessageBody({
+      mimeType: "text/plain",
+      headers: [{ name: "Content-Type", value: 'text/plain; charset="ISO-8859-1"' }],
+      body: { data: encodeLatin1("café") },
+    });
+    expect(result.text).toBe("café");
   });
 });
 
@@ -100,7 +155,8 @@ describe("buildRawMessage", () => {
 
     expect(raw).toContain("To: a@example.com");
     expect(raw).toContain("Subject: Hi");
-    expect(raw).toContain("Body text");
+    expect(raw).toContain("Content-Transfer-Encoding: base64");
+    expect(decodeMimeBody(raw)).toBe("Body text");
     expect(raw).not.toContain("In-Reply-To");
   });
 
@@ -150,5 +206,27 @@ describe("buildRawMessage", () => {
       "base64url",
     ).toString("utf8");
     expect(raw).toContain("Subject: =?UTF-8?B?");
+  });
+
+  it("round-trips a non-ASCII body consistently with its declared transfer encoding", () => {
+    const raw = Buffer.from(
+      buildRawMessage({ to: ["a@example.com"], subject: "Hi", body: "café ☕ déjà vu" }),
+      "base64url",
+    ).toString("utf8");
+
+    expect(raw).toContain("Content-Transfer-Encoding: base64");
+    expect(decodeMimeBody(raw)).toBe("café ☕ déjà vu");
+  });
+
+  it("folds a long base64-encoded body at 76 characters per RFC 2045", () => {
+    const raw = Buffer.from(
+      buildRawMessage({ to: ["a@example.com"], subject: "Hi", body: "x".repeat(200) }),
+      "base64url",
+    ).toString("utf8");
+
+    const bodyLines = raw.split("\r\n\r\n")[1].split("\r\n");
+    for (const line of bodyLines) {
+      expect(line.length).toBeLessThanOrEqual(76);
+    }
   });
 });

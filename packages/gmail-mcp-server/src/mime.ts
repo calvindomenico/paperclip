@@ -19,8 +19,36 @@ export function getHeader(headers: GmailHeader[] | null | undefined, name: strin
   return match?.value ?? null;
 }
 
-export function decodeBase64Url(data: string): string {
-  return Buffer.from(data, "base64url").toString("utf8");
+/**
+ * Node's Buffer only natively decodes a handful of encodings. Map the
+ * charset names Gmail actually sends in `Content-Type` onto one of those;
+ * anything unrecognized falls back to utf8 rather than throwing.
+ */
+function normalizeCharset(charset: string | null): BufferEncoding {
+  if (!charset) return "utf8";
+  switch (charset.trim().toLowerCase()) {
+    case "utf-8":
+    case "utf8":
+      return "utf8";
+    case "us-ascii":
+    case "ascii":
+      return "ascii";
+    case "iso-8859-1":
+    case "latin1":
+      return "latin1";
+    default:
+      return "utf8";
+  }
+}
+
+function getPartCharset(part: GmailMessagePartLike): string | null {
+  const contentType = getHeader(part.headers, "Content-Type");
+  const match = contentType?.match(/charset\s*=\s*"?([^";]+)"?/i);
+  return match ? match[1] : null;
+}
+
+export function decodeBase64Url(data: string, charset: string | null = null): string {
+  return Buffer.from(data, "base64url").toString(normalizeCharset(charset));
 }
 
 function stripHtml(html: string): string {
@@ -57,23 +85,29 @@ export function extractMessageBody(payload: GmailMessagePartLike | null | undefi
   let htmlText: string | null = null;
   const attachmentFilenames: string[] = [];
 
-  function visit(part: GmailMessagePartLike | null | undefined) {
+  function visit(part: GmailMessagePartLike | null | undefined, insideAttachment: boolean) {
     if (!part) return;
     if (part.filename) {
       attachmentFilenames.push(part.filename);
     }
-    const data = part.body?.data;
-    if (data && part.mimeType === "text/plain" && plainText === null) {
-      plainText = decodeBase64Url(data);
-    } else if (data && part.mimeType === "text/html" && htmlText === null) {
-      htmlText = decodeBase64Url(data);
+    // A part with a filename is an attachment, not inline body text, even if
+    // its mimeType is text/plain or text/html - and the same goes for every
+    // part nested underneath it (e.g. a forwarded message's own body parts).
+    const isAttachment = insideAttachment || Boolean(part.filename);
+    if (!isAttachment) {
+      const data = part.body?.data;
+      if (data && part.mimeType === "text/plain" && plainText === null) {
+        plainText = decodeBase64Url(data, getPartCharset(part));
+      } else if (data && part.mimeType === "text/html" && htmlText === null) {
+        htmlText = decodeBase64Url(data, getPartCharset(part));
+      }
     }
     for (const child of part.parts ?? []) {
-      visit(child);
+      visit(child, isAttachment);
     }
   }
 
-  visit(payload);
+  visit(payload, false);
 
   const raw = plainText ?? (htmlText !== null ? stripHtml(htmlText) : "");
   const truncated = raw.length > MESSAGE_BODY_CHAR_CAP;
@@ -88,6 +122,16 @@ function encodeHeaderWord(value: string): string {
   // eslint-disable-next-line no-control-regex
   if (/^[\x00-\x7F]*$/.test(value)) return value;
   return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
+}
+
+/** RFC 2045 §6.8: base64-encoded body lines must not exceed 76 characters. */
+function encodeBodyBase64(body: string): string {
+  const b64 = Buffer.from(body, "utf8").toString("base64");
+  const lines: string[] = [];
+  for (let i = 0; i < b64.length; i += 76) {
+    lines.push(b64.slice(i, i + 76));
+  }
+  return lines.join("\r\n");
 }
 
 export interface BuildRawMessageInput {
@@ -137,9 +181,9 @@ export function buildRawMessage(input: BuildRawMessageInput): string {
   if (input.references) lines.push(`References: ${input.references}`);
   lines.push("MIME-Version: 1.0");
   lines.push("Content-Type: text/plain; charset=\"UTF-8\"");
-  lines.push("Content-Transfer-Encoding: 7bit");
+  lines.push("Content-Transfer-Encoding: base64");
   lines.push("");
-  lines.push(input.body);
+  lines.push(encodeBodyBase64(input.body));
 
   const raw = lines.join("\r\n");
   return Buffer.from(raw, "utf8").toString("base64url");
