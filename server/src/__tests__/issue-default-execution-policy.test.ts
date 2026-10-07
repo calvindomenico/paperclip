@@ -371,6 +371,40 @@ describeEmbeddedPostgres("company/project default execution policy", () => {
     expect(res.body.assigneeAgentId).toBe(creator.id);
   });
 
+  it("drops the company default's monitor on a direct issueService.create call that bypasses the HTTP routes", async () => {
+    const company = await seedCompany();
+    const creator = await seedAgentRow(company.id);
+    await db
+      .update(companies)
+      .set({
+        defaultExecutionPolicy: {
+          mode: "normal",
+          commentRequired: true,
+          stages: [],
+          monitor: { nextCheckAt: new Date(Date.now() + 60_000).toISOString() },
+        } as never,
+      })
+      .where(eq(companies.id, company.id));
+
+    // A direct service caller (e.g. inbound email creating a "todo" issue)
+    // never goes through withAuthorizedInheritedMonitor the way the HTTP
+    // routes do. Without the same drop applied inside create() itself, the
+    // inherited monitor would reach buildInitialIssueMonitorFields and throw
+    // a 422 that this caller has no HTTP response to surface -- for email,
+    // that meant the delivery just retried forever. Status defaults to
+    // "backlog" here (no assignee), which cannot hold a monitor either way.
+    const created = await issueService(db).create(company.id, {
+      title: "Created directly through the service, picks up company default",
+      actorResponsibleUserId: null,
+      trustExplicitResponsibleUserId: true,
+    });
+
+    expect(created.status).toBe("backlog");
+    expect(
+      (created.executionPolicy as { monitor?: unknown } | null)?.monitor ?? null,
+    ).toBeNull();
+  });
+
   it("drops the company default's monitor, without 403ing, when handing a task to a different assignee the creator can't manage monitors for", async () => {
     const company = await seedCompany();
     const creator = await seedAgentRow(company.id);

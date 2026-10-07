@@ -143,6 +143,7 @@ import {
 } from "./native-runtime/native-chat-review-presentation.js";
 import {
   buildInitialIssueMonitorFields,
+  issueAllowsMonitor,
   normalizeIssueExecutionPolicy,
 } from "./issue-execution-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
@@ -10350,8 +10351,25 @@ export function issueService(db: Db) {
             { companyId, projectId: issueData.projectId ?? null },
           );
           if (defaultExecutionPolicy) {
-            issueData.executionPolicy =
-              defaultExecutionPolicy as unknown as Record<string, unknown>;
+            // A direct service caller (e.g. inbound email creating a "todo"
+            // issue) never goes through withAuthorizedInheritedMonitor the
+            // way the HTTP routes do, so an inherited monitor that this
+            // issue's status/assignee can't hold yet would otherwise reach
+            // buildInitialIssueMonitorFields() below and throw 422 on every
+            // such create. Drop it here too; the default's approval stages
+            // still apply.
+            const defaultAllowsMonitor =
+              !defaultExecutionPolicy.monitor ||
+              issueAllowsMonitor(
+                issueData.status ?? "backlog",
+                issueData.assigneeAgentId ?? null,
+                issueData.assigneeUserId ?? null,
+              );
+            issueData.executionPolicy = (
+              defaultAllowsMonitor
+                ? defaultExecutionPolicy
+                : { ...defaultExecutionPolicy, monitor: undefined }
+            ) as unknown as Record<string, unknown>;
           }
         }
 
