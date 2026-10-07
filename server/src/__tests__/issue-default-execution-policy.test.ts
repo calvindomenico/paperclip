@@ -307,6 +307,57 @@ describeEmbeddedPostgres("company/project default execution policy", () => {
     expect(row!.defaultExecutionPolicy).toBeNull();
   });
 
+  it("lets an agent create a task for a different assignee when the company default includes a monitor", async () => {
+    const company = await seedCompany();
+    const creator = await seedAgentRow(company.id);
+    const assignee = await seedAgentRow(company.id);
+    await db
+      .update(companies)
+      .set({
+        defaultExecutionPolicy: {
+          mode: "normal",
+          commentRequired: true,
+          stages: [],
+          monitor: { nextCheckAt: new Date(Date.now() + 60_000).toISOString() },
+        } as never,
+      })
+      .where(eq(companies.id, company.id));
+
+    // The creating agent is not the assignee, so if the inherited default's
+    // monitor were mistakenly treated as an explicit monitor change,
+    // assertCanManageIssueMonitor would 403 here even though creating and
+    // assigning this task is otherwise allowed for the creator.
+    const res = await request(app(agentActor(creator.id, company.id)))
+      .post(`/api/companies/${company.id}/issues`)
+      .send({
+        title: "Handed off to another agent, picks up company default",
+        assigneeAgentId: assignee.id,
+        status: "in_progress",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.executionPolicy.monitor).toBeTruthy();
+    expect(res.body.assigneeAgentId).toBe(assignee.id);
+  });
+
+  it("still rejects an agent that explicitly sets a monitor on a task it isn't assigned", async () => {
+    const company = await seedCompany();
+    const agent = await seedAgentRow(company.id);
+
+    const res = await request(app(agentActor(agent.id, company.id)))
+      .post(`/api/companies/${company.id}/issues`)
+      .send({
+        title: "Explicit monitor without being the assignee",
+        executionPolicy: {
+          stages: [],
+          monitor: { nextCheckAt: new Date(Date.now() + 60_000).toISOString() },
+        },
+      })
+      .expect(403);
+
+    expect(JSON.stringify(res.body)).toContain("manage issue monitors");
+  });
+
   it("lets a board actor set and read back the company default execution policy", async () => {
     const company = await seedCompany();
 

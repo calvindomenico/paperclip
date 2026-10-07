@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Regression coverage for two Greptile P2 findings on PR #15267 against
+// Regression coverage for three Greptile P2 findings on PR #15267 against
 // the default-execution-policy editor in CompanySettings.tsx:
 //
 //   1. Typing in the policy textarea must not discard unsaved
@@ -10,6 +10,10 @@
 //      request is still in flight, must not be clobbered by that request's
 //      onSuccess handler when it later resolves with the (now-stale)
 //      submitted text.
+//   3. Typing a newer, unsaved edit while an earlier save is still in
+//      flight must not be labeled "Saved" once that earlier save resolves --
+//      `mutation.isSuccess` reflects the request settling, not whether the
+//      *visible* draft is what got persisted.
 //
 // There is no existing render-test harness for CompanySettings.tsx itself
 // (the file named CompanySettings.test.tsx actually renders
@@ -232,5 +236,42 @@ describe("CompanySettings default execution policy draft", () => {
 
     // The newer, unsaved edit must still be in the textarea.
     expect(getPolicyTextarea(container).value).toBe('{"stages":[],"maxReviewRounds":2}');
+  });
+
+  it("does not label a newer unsaved edit as Saved once an earlier in-flight save resolves", async () => {
+    let resolveSave: (value: { defaultExecutionPolicy: Company["defaultExecutionPolicy"] }) => void = () => {};
+    mockCompaniesApi.putDefaultExecutionPolicy.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+
+    setInputValue(getPolicyTextarea(container), '{"stages":[]}');
+    await flushReact();
+
+    const saveButton = container.querySelector(
+      "[data-testid='company-settings-default-execution-policy-save']",
+    ) as HTMLButtonElement | null;
+    await act(async () => {
+      saveButton!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await flushReact();
+
+    // User keeps typing while the save for '{"stages":[]}' is still in flight.
+    setInputValue(getPolicyTextarea(container), '{"stages":[],"maxReviewRounds":2}');
+    await flushReact();
+
+    await act(async () => {
+      resolveSave({ defaultExecutionPolicy: { stages: [] } as unknown as Company["defaultExecutionPolicy"] });
+    });
+    await flushReact();
+    await flushReact();
+
+    // The mutation did settle (isSuccess is true), but the visible draft is
+    // the newer, still-unsaved edit -- "Saved" must not appear next to it.
+    expect(container.textContent).not.toContain("Saved");
+    // The save button must still read as actionable, not mid-flight.
+    expect(saveButton!.textContent).toBe("Save changes");
   });
 });

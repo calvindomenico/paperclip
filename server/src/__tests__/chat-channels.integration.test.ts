@@ -25779,7 +25779,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
           ),
         );
       expect(conversation).toBeDefined();
-      const firstRun = await db
+      const allRunsDebug = await db
         .select()
         .from(heartbeatRuns)
         .where(
@@ -25787,8 +25787,20 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
             eq(heartbeatRuns.companyId, fixture.companyId),
             eq(heartbeatRuns.agentId, fixture.assignedAgentId),
           ),
-        )
-        .then((rows) => rows.find((row) => row.status === "succeeded"));
+        );
+      // eslint-disable-next-line no-console
+      console.log(
+        "DEBUG allRunsDebug",
+        JSON.stringify(
+          allRunsDebug.map((r) => ({
+            id: r.id,
+            status: r.status,
+            failureReason: (r as Record<string, unknown>).failureReason,
+            error: (r as Record<string, unknown>).error,
+          })),
+        ),
+      );
+      const firstRun = allRunsDebug.find((row) => row.status === "succeeded");
       expect(firstRun).toBeDefined();
       const firstAdapterInput = execute.mock.calls[0]?.[0] as
         { context?: { paperclipWake?: unknown } } | undefined;

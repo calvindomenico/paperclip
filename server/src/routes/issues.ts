@@ -3944,8 +3944,18 @@ export function issueRoutes(
     companyId: string,
     projectId: string | null,
     requestedPolicy: unknown,
-  ) {
+  ): Promise<{
+    policy: NormalizedExecutionPolicy | null;
+    // True only when the caller's own request body explicitly included a
+    // monitor. False when the resolved policy's monitor (if any) was
+    // inherited from the company/project defaultExecutionPolicy — inheriting
+    // a default is not the caller "managing" the monitor, so it must not
+    // trigger assertCanManageIssueMonitor's assignee-only check below.
+    monitorExplicitlyRequested: boolean;
+  }> {
     let policy = normalizeIssueExecutionPolicy(requestedPolicy);
+    const monitorExplicitlyRequested =
+      requestedPolicy !== undefined && Boolean(policy?.monitor);
     // Only an omitted executionPolicy (not an explicit null/empty one) falls
     // back to the project's, then the company's, defaultExecutionPolicy.
     // These two HTTP create routes never produce routine-generated or
@@ -3958,24 +3968,28 @@ export function issueRoutes(
         projectId,
       });
     }
-    if (req.actor.type !== "agent") return policy;
+    if (req.actor.type !== "agent") return { policy, monitorExplicitlyRequested };
     const trust = await resolveAgentTrustForIssue(
       { agentId: req.actor.agentId, runId: req.actor.runId },
       companyId,
       { companyId, projectId, executionPolicy: policy },
     );
     if (trust?.kind === "denied") throw forbidden(trust.detail);
-    if (trust?.kind !== "low_trust_review") return policy;
+    if (trust?.kind !== "low_trust_review")
+      return { policy, monitorExplicitlyRequested };
     // A new task must retain the creator's effective containment, including
     // run-only restrictions. Client policy can narrow it, never reset it.
-    return normalizeIssueExecutionPolicy({
-      ...policy,
-      authorizationPolicy: {
-        ...policy?.authorizationPolicy,
-        trustPreset: trust.preset,
-        trustBoundary: trust.boundary,
-      },
-    });
+    return {
+      policy: normalizeIssueExecutionPolicy({
+        ...policy,
+        authorizationPolicy: {
+          ...policy?.authorizationPolicy,
+          trustPreset: trust.preset,
+          trustBoundary: trust.boundary,
+        },
+      }),
+      monitorExplicitlyRequested,
+    };
   }
 
   async function directParentReportDisabledForIssue(issue: {
@@ -11822,13 +11836,15 @@ export function issueRoutes(
         createBody.executionWorkspaceSettings?.environmentId,
       );
 
-      const executionPolicy = applyActorMonitorScheduledBy(
+      const resolvedCreatedExecutionPolicy =
         await resolveCreatedIssueExecutionPolicy(
           req,
           companyId,
           createAssignmentScope.projectId,
           createBody.executionPolicy,
-        ),
+        );
+      const executionPolicy = applyActorMonitorScheduledBy(
+        resolvedCreatedExecutionPolicy.policy,
         actor.actorType,
       );
       await assertCanManageIssueMonitor(
@@ -11836,7 +11852,7 @@ export function issueRoutes(
         req,
         companyId,
         createBody.assigneeAgentId ?? null,
-        Boolean(executionPolicy?.monitor),
+        resolvedCreatedExecutionPolicy.monitorExplicitlyRequested,
       );
       const issueId = randomUUID();
       const sourceTrust = await sourceTrustForActorWrite(
@@ -12173,13 +12189,15 @@ export function issueRoutes(
       const currentSerializedChild = serializationContext
         ? await findCurrentSerializedWatchdogChild(parent)
         : null;
-      const executionPolicy = applyActorMonitorScheduledBy(
+      const resolvedChildExecutionPolicy =
         await resolveCreatedIssueExecutionPolicy(
           req,
           parent.companyId,
           childAssignmentScope.projectId,
           createBody.executionPolicy,
-        ),
+        );
+      const executionPolicy = applyActorMonitorScheduledBy(
+        resolvedChildExecutionPolicy.policy,
         actor.actorType,
       );
       await assertCanManageIssueMonitor(
@@ -12187,7 +12205,7 @@ export function issueRoutes(
         req,
         parent.companyId,
         createBody.assigneeAgentId ?? null,
-        Boolean(executionPolicy?.monitor),
+        resolvedChildExecutionPolicy.monitorExplicitlyRequested,
       );
       const issueId = randomUUID();
       const sourceTrust = await sourceTrustForActorWrite(
@@ -12408,6 +12426,16 @@ export function issueRoutes(
         let resolvedExecutionPolicy = normalizeIssueExecutionPolicy(
           child.executionPolicy,
         );
+        // True only when the plan-decomposition request body explicitly
+        // included a monitor for this child — mirrors
+        // resolveCreatedIssueExecutionPolicy's monitorExplicitlyRequested
+        // above. Computed before the defaultExecutionPolicy fallback below,
+        // since inheriting a default monitor is not the caller "managing"
+        // the monitor and must not trigger assertCanManageIssueMonitor's
+        // assignee-only check.
+        const monitorExplicitlyRequested =
+          child.executionPolicy !== undefined &&
+          Boolean(resolvedExecutionPolicy?.monitor);
         // Only an omitted executionPolicy (not an explicit null/empty one)
         // falls back to the project's, then the company's,
         // defaultExecutionPolicy — mirrors resolveCreatedIssueExecutionPolicy
@@ -12430,7 +12458,7 @@ export function issueRoutes(
           req,
           sourceIssue.companyId,
           child.assigneeAgentId ?? null,
-          Boolean(executionPolicy?.monitor),
+          monitorExplicitlyRequested,
         );
         const childIssueId = randomUUID();
         const sourceTrust = await sourceTrustForActorWrite(

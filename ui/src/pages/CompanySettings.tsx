@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useState } from "react";
+import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -14,6 +14,7 @@ import { resolveCompanyArchiveDeparture } from "../lib/company-selection";
 import { cloudPortfolioManageUrl } from "../lib/cloudLinks";
 import { navigateTopLevel } from "@/lib/browserNavigation";
 import { companiesApi } from "../api/companies";
+import { type CompanyListResult } from "../api/companies-query";
 import { assetsApi } from "../api/assets";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
@@ -62,6 +63,15 @@ export function CompanySettings() {
   // protects an in-progress edit from being clobbered by an unrelated
   // background refetch (e.g. after toggling requireBoardApprovalForNewAgents).
   const [defaultExecutionPolicyDirty, setDefaultExecutionPolicyDirty] = useState(false);
+
+  // The text of the most recent save that actually completed for the
+  // selected company, regardless of what the draft looks like now. Backs the
+  // "Saved" label below: `mutation.isSuccess` alone only means a request
+  // once settled, not that the visible draft is what it saved -- the user
+  // may have kept typing (or the company may have changed) after clicking
+  // Save but before the response landed, in which case the draft holds a
+  // newer, still-unsaved edit and must not be labeled "Saved".
+  const lastSavedDefaultExecutionPolicyTextRef = useRef<string | null>(null);
 
   // Tracks which company's defaultExecutionPolicy is currently loaded into
   // the draft textarea. A company switch always re-syncs (and discards any
@@ -165,12 +175,41 @@ export function CompanySettings() {
       submittedText: string;
     }) => companiesApi.putDefaultExecutionPolicy(companyId, policy),
     onSuccess: (result, variables) => {
+      // Patch the company-list cache with the save result *synchronously*,
+      // in the same tick as the dirty-flag clear below. The draft-sync
+      // effect further down treats "clean" as license to re-copy
+      // selectedCompany.defaultExecutionPolicy into the draft (so background
+      // refetches of this company get picked up); clearing dirty without
+      // also updating the cache would let that effect re-run against the
+      // still-stale pre-save cache entry (invalidateQueries only schedules a
+      // refetch, it does not resolve one) and stomp the just-saved text back
+      // to what it replaced. Writing the result in directly removes the lag
+      // instead of racing it. invalidateQueries still runs after, so any
+      // server-side normalization beyond what `result` reports is picked up
+      // too.
+      queryClient.setQueriesData<CompanyListResult>(
+        { queryKey: queryKeys.companies.all },
+        (current) =>
+          current && {
+            ...current,
+            companies: current.companies.map((company) =>
+              company.id === variables.companyId
+                ? { ...company, defaultExecutionPolicy: result.defaultExecutionPolicy }
+                : company
+            ),
+          }
+      );
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
       // The user may have switched to a different company while this save
       // was in flight; only the still-selected company's draft should be
       // overwritten with the save result, or it clobbers the other
       // company's unsaved (or already-saved) text.
       if (variables.companyId !== selectedCompanyId) return;
+      // Recorded even if a newer draft has since superseded it (checked
+      // below): the "Saved" label compares the *live* draft against this at
+      // render time, so it still correctly reads "not saved" once a later
+      // edit moves the draft away from what this save persisted.
+      lastSavedDefaultExecutionPolicyTextRef.current = variables.submittedText;
       // The user may have kept typing in the textarea after clicking Save,
       // while this request was in flight. If the draft no longer matches
       // what was actually submitted, it holds a newer, unsaved edit --
@@ -506,9 +545,10 @@ export function CompanySettings() {
             >
               {defaultExecutionPolicyMutation.isPending ? "Saving..." : "Save changes"}
             </Button>
-            {defaultExecutionPolicyMutation.isSuccess && (
-              <span className="text-xs text-muted-foreground">Saved</span>
-            )}
+            {defaultExecutionPolicyMutation.isSuccess &&
+              defaultExecutionPolicyText === lastSavedDefaultExecutionPolicyTextRef.current && (
+                <span className="text-xs text-muted-foreground">Saved</span>
+              )}
           </div>
         )}
         {defaultExecutionPolicyError && (
