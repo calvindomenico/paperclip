@@ -72,8 +72,13 @@ describe("GET /projects/:id/default-execution-policy authorization", () => {
 
     const res = await request(app).get(`/api/projects/${PROJECT_ID}/default-execution-policy`);
 
-    expect(res.status).toBe(403);
-    expect(res.body.error).toBe("Project is outside this actor's authorization boundary");
+    // assertProjectReadAllowed (shared by every project-read route in this
+    // file, e.g. GET /projects/:id) 404s rather than 403s on denial, so a
+    // caller can't distinguish "doesn't exist" from "exists but I can't read
+    // it" — this route must not leak project existence any differently than
+    // its siblings do.
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Project not found");
   });
 
   it("returns the policy for an actor whose project:read is allowed", async () => {
