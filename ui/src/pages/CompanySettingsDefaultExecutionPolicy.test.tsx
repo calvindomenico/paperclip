@@ -14,6 +14,10 @@
 //      flight must not be labeled "Saved" once that earlier save resolves --
 //      `mutation.isSuccess` reflects the request settling, not whether the
 //      *visible* draft is what got persisted.
+//   4. An untouched name/description field must refresh when
+//      selectedCompany's own value changes externally (e.g. another tab
+//      saved first), instead of reading that refetch as a local edit and
+//      offering to write the stale local value back over it.
 //
 // There is no existing render-test harness for CompanySettings.tsx itself
 // (the file named CompanySettings.test.tsx actually renders
@@ -126,6 +130,15 @@ function getNameInput(container: HTMLElement): HTMLInputElement {
   );
   const input = label?.parentElement?.parentElement?.querySelector("input");
   if (!input) throw new Error("Organization name input not found");
+  return input as HTMLInputElement;
+}
+
+function getDescriptionInput(container: HTMLElement): HTMLInputElement {
+  const label = Array.from(container.querySelectorAll("label")).find(
+    (el) => el.textContent?.trim() === "Description",
+  );
+  const input = label?.parentElement?.parentElement?.querySelector("input");
+  if (!input) throw new Error("Description input not found");
   return input as HTMLInputElement;
 }
 
@@ -330,5 +343,44 @@ describe("CompanySettings default execution policy draft", () => {
     expect(
       container.querySelector("[data-testid='company-settings-default-execution-policy-save']"),
     ).toBeNull();
+  });
+
+  it("refreshes an untouched organization name instead of treating an external rename as a local edit", async () => {
+    // No local edit happened in this tab. Simulate a background refetch
+    // (e.g. triggered by the policy save's invalidateQueries, or a plain
+    // poll) landing after another tab renamed the company. Before the
+    // fix, generalDirty was derived by diffing the still-unchanged local
+    // companyName against the new selectedCompany.name, so this refetch
+    // alone made it read as dirty: the field kept the old name, a "Save
+    // changes" button appeared, and clicking it would have written the old
+    // name back over the other tab's rename.
+    selectedCompany = { ...baseCompany, name: "Renamed By Other Tab" };
+    await renderApp();
+
+    expect(getNameInput(container).value).toBe("Renamed By Other Tab");
+    expect(container.textContent).not.toContain("Save changes");
+  });
+
+  it("refreshes an untouched organization description the same way", async () => {
+    selectedCompany = { ...baseCompany, description: "Set by another tab" };
+    await renderApp();
+
+    expect(getDescriptionInput(container).value).toBe("Set by another tab");
+    expect(container.textContent).not.toContain("Save changes");
+  });
+
+  it("still discards a real unsaved edit on an actual company switch, but preserves it across a same-company refetch", async () => {
+    const nameInput = getNameInput(container);
+    setInputValue(nameInput, "Mid-edit Name");
+    await flushReact();
+    expect(getNameInput(container).value).toBe("Mid-edit Name");
+
+    // Switching companies must still discard the outgoing draft, even
+    // though it's "dirty" -- this must keep working now that dirty is
+    // tracked explicitly instead of derived.
+    selectedCompany = { ...baseCompany, id: "company-2", name: "Second Co" };
+    await renderApp();
+
+    expect(getNameInput(container).value).toBe("Second Co");
   });
 });

@@ -93,10 +93,15 @@ export function CompanySettings() {
     string | null
   >(null);
 
-  const generalDirty =
-    !!selectedCompany &&
-    (companyName !== selectedCompany.name ||
-      description !== (selectedCompany.description ?? ""));
+  // Whether the user has edited name/description since the last sync from
+  // selectedCompany or a successful save. Tracked explicitly (not derived
+  // by diffing companyName/description against selectedCompany) so an
+  // unrelated refetch that changes selectedCompany's own name/description
+  // (e.g. another tab saved first) isn't misread as a local edit -- that
+  // would both block the resync below and offer to write our stale draft
+  // back over the other tab's change. Mirrors defaultExecutionPolicyDirty
+  // above.
+  const [generalDirty, setGeneralDirty] = useState(false);
 
   // Sync general (name/description/logo/governance) local state from the
   // selected company. Refresh on a company switch (even if the outgoing
@@ -112,6 +117,7 @@ export function CompanySettings() {
       setLogoUrl(selectedCompany.logoUrl ?? "");
       setGovernance(selectedCompany.interactionResolverGovernance ?? {});
       setGeneralSyncedCompanyId(selectedCompany.id);
+      setGeneralDirty(false);
     }
   }, [selectedCompany, generalSyncedCompanyId, generalDirty]);
 
@@ -137,11 +143,27 @@ export function CompanySettings() {
 
   const generalMutation = useMutation({
     mutationFn: (data: {
+      companyId: string;
       name: string;
       description: string | null;
-    }) => companiesApi.update(selectedCompanyId!, data),
-    onSuccess: () => {
+    }) => companiesApi.update(data.companyId, { name: data.name, description: data.description }),
+    onSuccess: (_result, variables) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+      // The user may have switched to a different company while this save
+      // was in flight, or kept typing after clicking Save -- in either case
+      // the live draft no longer represents what this response confirms was
+      // saved, so clearing dirty here would make an unsaved (or
+      // already-superseded) edit look saved. Only clear it when the draft
+      // still matches exactly what was submitted, mirroring the same guard
+      // on the default-execution-policy save above.
+      if (variables.companyId !== selectedCompanyId) return;
+      if (
+        companyName.trim() !== variables.name ||
+        (description.trim() || null) !== variables.description
+      ) {
+        return;
+      }
+      setGeneralDirty(false);
     }
   });
 
@@ -371,7 +393,9 @@ export function CompanySettings() {
   }
 
   function handleSaveGeneral() {
+    if (!selectedCompanyId) return;
     generalMutation.mutate({
+      companyId: selectedCompanyId,
       name: companyName.trim(),
       description: description.trim() || null
     });
@@ -395,7 +419,10 @@ export function CompanySettings() {
               className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
               type="text"
               value={companyName}
-              onChange={(e) => setCompanyName(e.target.value)}
+              onChange={(e) => {
+                setCompanyName(e.target.value);
+                setGeneralDirty(true);
+              }}
             />
             {isCloudManaged && (
               <p className="mt-1 text-xs text-muted-foreground">
@@ -413,7 +440,10 @@ export function CompanySettings() {
               type="text"
               value={description}
               placeholder="Optional organization description"
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={(e) => {
+                setDescription(e.target.value);
+                setGeneralDirty(true);
+              }}
             />
           </Field>
         </div>
