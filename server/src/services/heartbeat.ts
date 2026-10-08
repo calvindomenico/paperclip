@@ -3635,15 +3635,10 @@ export function heartbeatService(
       return;
     }
 
-    const ownerAgent = await getAgent(input.claimed.assigneeAgentId!);
-    const ownerInvokability = await getAgentInvokability(ownerAgent);
-    if (!ownerInvokability.invokable) {
-      // The assignee is the same agent the monitor just failed to dispatch
-      // to (most commonly paused for budget/quota reasons) — waking them now
-      // would hit the identical failure. Throwing here would also undo the
-      // clear's accounting in the caller and silently drop the recovery
-      // notice; fall back to a visible comment instead, like
-      // escalate_to_board does.
+    const fallBackToRecoveryComment = async (reason: string) => {
+      // Falling back here (rather than letting the caller's exception
+      // propagate) avoids undoing the clear's accounting and silently
+      // dropping the recovery notice; same idea as escalate_to_board.
       await db.insert(issueComments).values({
         companyId: input.claimed.companyId,
         issueId: input.claimed.id,
@@ -3652,7 +3647,7 @@ export function heartbeatService(
           clearReason: input.clearReason,
           recoveryPolicy: input.recoveryPolicy,
           nextAttemptCount: input.nextAttemptCount,
-        })}\n\nThe assignee could not be woken (${ownerInvokability.reason ?? "not invokable"}); escalating here instead.`,
+        })}\n\nThe assignee could not be woken (${reason}); escalating here instead.`,
       });
 
       await logActivity(db, {
@@ -3664,47 +3659,69 @@ export function heartbeatService(
         action: "issue.monitor_recovery_wake_skipped",
         entityType: "issue",
         entityId: input.claimed.id,
-        details: { ...details, reason: ownerInvokability.reason ?? null },
+        details: { ...details, reason },
       });
+    };
+
+    const ownerAgent = await getAgent(input.claimed.assigneeAgentId!);
+    const ownerInvokability = await getAgentInvokability(ownerAgent);
+    if (!ownerInvokability.invokable) {
+      // The assignee is the same agent the monitor just failed to dispatch
+      // to (most commonly paused for budget/quota reasons) — waking them now
+      // would hit the identical failure.
+      await fallBackToRecoveryComment(ownerInvokability.reason ?? "not invokable");
       return;
     }
 
-    await enqueueWakeup(input.claimed.assigneeAgentId!, {
-      source: "automation",
-      triggerDetail: "system",
-      reason: "issue_monitor_recovery",
-      idempotencyKey: `issue-monitor-recovery:${input.claimed.id}:${input.clearReason}:${input.scheduledAtIso}`,
-      payload: withRecoveryContext(
-        {
-          issueId: input.claimed.id,
-          monitorAttemptCount: input.nextAttemptCount,
-          monitorNotes: input.claimed.monitorNotes ?? null,
-          clearReason: input.clearReason,
-          serviceName: input.monitor?.serviceName ?? null,
-          timeoutAt: input.monitor?.timeoutAt ?? null,
-          maxAttempts: input.monitor?.maxAttempts ?? null,
-          ...(reviewPathContext ?? {}),
-        },
-        "status_only",
-      ),
-      requestedByActorType: input.actorType,
-      requestedByActorId: input.actorId,
-      contextSnapshot: withRecoveryContext(
-        {
-          issueId: input.claimed.id,
-          source: "issue.monitor.recovery",
-          wakeReason: "issue_monitor_recovery",
-          monitorAttemptCount: input.nextAttemptCount,
-          monitorNotes: input.claimed.monitorNotes ?? null,
-          clearReason: input.clearReason,
-          serviceName: input.monitor?.serviceName ?? null,
-          timeoutAt: input.monitor?.timeoutAt ?? null,
-          maxAttempts: input.monitor?.maxAttempts ?? null,
-          ...(reviewPathContext ?? {}),
-        },
-        "status_only",
-      ),
-    });
+    try {
+      await enqueueWakeup(input.claimed.assigneeAgentId!, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_monitor_recovery",
+        idempotencyKey: `issue-monitor-recovery:${input.claimed.id}:${input.clearReason}:${input.scheduledAtIso}`,
+        payload: withRecoveryContext(
+          {
+            issueId: input.claimed.id,
+            monitorAttemptCount: input.nextAttemptCount,
+            monitorNotes: input.claimed.monitorNotes ?? null,
+            clearReason: input.clearReason,
+            serviceName: input.monitor?.serviceName ?? null,
+            timeoutAt: input.monitor?.timeoutAt ?? null,
+            maxAttempts: input.monitor?.maxAttempts ?? null,
+            ...(reviewPathContext ?? {}),
+          },
+          "status_only",
+        ),
+        requestedByActorType: input.actorType,
+        requestedByActorId: input.actorId,
+        contextSnapshot: withRecoveryContext(
+          {
+            issueId: input.claimed.id,
+            source: "issue.monitor.recovery",
+            wakeReason: "issue_monitor_recovery",
+            monitorAttemptCount: input.nextAttemptCount,
+            monitorNotes: input.claimed.monitorNotes ?? null,
+            clearReason: input.clearReason,
+            serviceName: input.monitor?.serviceName ?? null,
+            timeoutAt: input.monitor?.timeoutAt ?? null,
+            maxAttempts: input.monitor?.maxAttempts ?? null,
+            ...(reviewPathContext ?? {}),
+          },
+          "status_only",
+        ),
+      });
+    } catch (err) {
+      // getAgentInvokability only rules out a paused/suspended agent; it
+      // doesn't see a company/project budget block, which enqueueWakeup
+      // also rejects with a 4xx. The agent is usually still not invokable
+      // at the moment a monitor exhausts (that's the realistic trigger for
+      // exhaustion), so this is expected to fire sometimes, not a bug.
+      if (err instanceof HttpError && err.status >= 400 && err.status < 500) {
+        await fallBackToRecoveryComment(err.message);
+        return;
+      }
+      throw err;
+    }
 
     await logActivity(db, {
       companyId: input.claimed.companyId,
@@ -3841,6 +3858,16 @@ export function heartbeatService(
       claimed.executionPolicy ?? null,
     );
     const monitor = policy?.monitor ?? null;
+    // `normalizeIssueExecutionPolicy` always redacts `monitor.externalRef` to
+    // "[redacted]" (it's the same schema used to validate untrusted PUT
+    // input). Read the real value straight off the raw DB column so a
+    // deferred retry can preserve it instead of overwriting the saved source
+    // reference with the redacted placeholder.
+    const rawMonitorExternalRef =
+      typeof (claimed.executionPolicy as { monitor?: { externalRef?: unknown } } | null)?.monitor
+        ?.externalRef === "string"
+        ? (claimed.executionPolicy as { monitor: { externalRef: string } }).monitor.externalRef
+        : null;
     const clearReason = issueMonitorLimitClearReason({
       monitor,
       nextAttemptCount,
@@ -4069,7 +4096,16 @@ export function heartbeatService(
           }
 
           const deferDelayMs = monitorDispatchDeferDelayMs(nextAttemptCount);
-          const deferredTo = new Date(input.now.getTime() + deferDelayMs);
+          const monitorTimeoutAt = monitor?.timeoutAt ? new Date(monitor.timeoutAt) : null;
+          const uncappedDeferredTo = new Date(input.now.getTime() + deferDelayMs);
+          // Don't schedule the retry past the monitor's own timeout: tickDueIssueMonitors
+          // only selects rows whose monitorNextCheckAt is already due, so a deferredTo
+          // beyond timeoutAt would leave an expired monitor unable to be cleared until
+          // the backoff delay separately elapses.
+          const deferredTo =
+            monitorTimeoutAt && monitorTimeoutAt.getTime() < uncappedDeferredTo.getTime()
+              ? monitorTimeoutAt
+              : uncappedDeferredTo;
           const deferred = await db
             .update(issues)
             .set({
@@ -4078,6 +4114,7 @@ export function heartbeatService(
                 policy,
                 nextCheckAt: deferredTo,
                 attemptCount: nextAttemptCount,
+                rawExternalRef: rawMonitorExternalRef,
               })),
               updatedAt: new Date(),
             })
