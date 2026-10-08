@@ -1,3 +1,4 @@
+import { configuredEnvironment } from "../configured-environment.js";
 import { resolveAcpxProviderMode } from "../drivers/acpx/provider-mode.js";
 import { isAcpxCanonicalInputMethod } from "../drivers/acpx/profile-extensions.js";
 import { RunnerdTraceFrameIndex } from "./runnerd-trace-frame-index.js";
@@ -1789,6 +1790,10 @@ export function rehydrateRunnerdUsageNotification(
     tokenUsage: {
       total: record(rawParams.cumulative),
       runDelta: record(rawParams.runDelta),
+      // Normalized counters may contain placeholder zeroes. Keep the runner's
+      // authority beside the counters so ACPX/managed driver projections and
+      // durable replay cannot certify an incomplete delta as a free receipt.
+      runDeltaComplete: rawParams.runDeltaAvailable === true,
     },
   };
 }
@@ -3335,14 +3340,14 @@ function createSanitizedOpenCodeRunnerEnvironment(
     delete candidate[key];
     if (source?.[key] !== undefined) candidate[key] = source[key];
   }
-  return Object.fromEntries(
+  return { ...configuredEnvironment(source), ...Object.fromEntries(
     Object.entries(candidate).filter(
       ([key, value]) =>
         typeof value === "string" &&
         (OPEN_CODE_RUNNER_ENVIRONMENT_KEYS.has(key) ||
           /^LC_[A-Z0-9_]{1,32}$/.test(key)),
     ),
-  );
+  ) };
 }
 
 export function resolveSourceCodexHome(

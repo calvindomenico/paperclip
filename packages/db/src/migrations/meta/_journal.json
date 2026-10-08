@@ -2175,8 +2175,50 @@
     {
       "idx": 312,
       "version": "7",
-      "when": 1791340916975,
-      "tag": "0312_heavy_young_avengers",
+      "when": 1791336871975,
+      "tag": "0312_easy_eternity",
+      "breakpoints": true
+    },
+    {
+      "idx": 313,
+      "version": "7",
+      "when": 1791371746435,
+      "tag": "0313_private_task_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 314,
+      "version": "7",
+      "when": 1791371819805,
+      "tag": "0314_private_task_draft_assets",
+      "breakpoints": true
+    },
+    {
+      "idx": 315,
+      "version": "7",
+      "when": 1791390905429,
+      "tag": "0315_rapid_emma_frost",
+      "breakpoints": true
+    },
+    {
+      "idx": 316,
+      "version": "7",
+      "when": 1791400295370,
+      "tag": "0316_premium_slayback",
+      "breakpoints": true
+    },
+    {
+      "idx": 317,
+      "version": "7",
+      "when": 1791416259455,
+      "tag": "0317_messy_famine",
+      "breakpoints": true
+    },
+    {
+      "idx": 318,
+      "version": "7",
+      "when": 1791458033582,
+      "tag": "0318_peaceful_newton_destine",
       "breakpoints": true
     }
   ]
