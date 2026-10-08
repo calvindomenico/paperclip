@@ -1,5 +1,5 @@
 {
-  "id": "1e158fd0-ceb8-49e2-a565-fc99f7d2425c",
+  "id": "af0b2d33-956b-4b12-8d68-8b4e14c991b2",
   "prevId": "541f5e10-e2f3-44e1-b238-4d1cbfba61f2",
   "version": "7",
   "dialect": "postgresql",
@@ -12611,12 +12611,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'{}'::jsonb"
-        },
-        "default_execution_policy": {
-          "name": "default_execution_policy",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
         },
         "feedback_data_sharing_enabled": {
           "name": "feedback_data_sharing_enabled",
@@ -42277,12 +42271,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "default_execution_policy": {
-          "name": "default_execution_policy",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
         "archived_at": {
           "name": "archived_at",
           "type": "timestamp with time zone",
@@ -56266,7 +56254,7 @@
           "name": "expires_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",

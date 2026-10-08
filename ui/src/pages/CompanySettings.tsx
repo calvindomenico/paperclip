@@ -148,7 +148,28 @@ export function CompanySettings() {
       name: string;
       description: string | null;
     }) => companiesApi.update(data.companyId, { name: data.name, description: data.description }),
-    onSuccess: (_result, variables) => {
+    onSuccess: (result, variables) => {
+      // Patch the company-list cache synchronously, same as the
+      // default-execution-policy save below: the sync effect above treats
+      // "clean" as license to re-copy selectedCompany.name/description into
+      // local state, and invalidateQueries only schedules a refetch rather
+      // than resolving one in this tick. Clearing generalDirty without first
+      // updating the cache would let that effect fire against the still-
+      // stale pre-save entry and revert the just-saved text back to it.
+      queryClient.setQueriesData<CompanyListResult>(
+        { queryKey: queryKeys.companies.all },
+        (current) =>
+          current && Array.isArray(current.companies)
+            ? {
+                ...current,
+                companies: current.companies.map((company) =>
+                  company.id === variables.companyId
+                    ? { ...company, name: result.name, description: result.description }
+                    : company
+                ),
+              }
+            : current
+      );
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
       // The user may have switched to a different company while this save
       // was in flight, or kept typing after clicking Save -- in either case

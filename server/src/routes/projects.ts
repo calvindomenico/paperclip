@@ -516,6 +516,7 @@ export function projectRoutes(db: Db) {
       const id = req.params.id as string;
       const existing = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
       if (!existing) return;
+      if (!(await assertProjectReadAllowed(req, res, existing))) return;
       if (req.actor.type !== "board") {
         res.status(403).json({ error: "Only board users can set the project default execution policy" });
         return;

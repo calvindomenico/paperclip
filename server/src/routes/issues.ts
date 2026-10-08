@@ -287,6 +287,7 @@ import {
   ISSUE_WAKE_DIAGNOSTICS_MAX_WAKE_REQUESTS,
   readAcceptedPlanConfirmationTarget,
   resolveDefaultIssueExecutionPolicy,
+  resolveResponsibleUserIdForIssueCreate,
   type IssuePostCommitAction,
 } from "../services/issues.js";
 import {
@@ -2218,6 +2219,17 @@ async function withAuthorizedInheritedMonitor(
 ): Promise<NormalizedExecutionPolicy | null> {
   if (!policy?.monitor || monitorFromRequest) return policy;
   if (!issueAllowsMonitor(status, assigneeAgentId, assigneeUserId)) {
+    return normalizeIssueExecutionPolicy({ ...policy, monitor: undefined });
+  }
+  // A default monitor's timeoutAt is a fixed point in time baked into the
+  // template, not relative to when an issue actually picks it up. Once that
+  // date has passed, buildInitialIssueMonitorFields() 422s the create — drop
+  // the already-expired inherited monitor instead, same as an unauthorized
+  // or not-yet-eligible one; the default's approval stages still apply.
+  if (
+    policy.monitor.timeoutAt &&
+    new Date(policy.monitor.timeoutAt).getTime() <= Date.now()
+  ) {
     return normalizeIssueExecutionPolicy({ ...policy, monitor: undefined });
   }
   if (await canManageIssueMonitor(accessSvc, req, companyId, assigneeAgentId)) {
@@ -12259,6 +12271,38 @@ export function issueRoutes(
         companyId,
         createBody.executionWorkspaceSettings?.environmentId,
       );
+
+      // A private top-level issue with no explicit project lands in the
+      // responsible user's personal project (see the matching branch in
+      // services/issues.ts). Resolve that project here too, before picking
+      // a default executionPolicy below, so the personal project's own
+      // default isn't skipped in favor of only the company's.
+      if (
+        createBody.visibility === "private" &&
+        !createAssignmentScope.projectId &&
+        !createAssignmentScope.parentIssueId
+      ) {
+        const privateTaskResponsibleUserId =
+          await resolveResponsibleUserIdForIssueCreate(db, companyId, {
+            explicitResponsibleUserId: createBody.responsibleUserId ?? null,
+            createdByUserId:
+              actor.actorType === "user" ? actor.actorId : null,
+            parentId: null,
+            originKind: createBody.originKind ?? "manual",
+            originRunId: createBody.originRunId ?? null,
+            actorRunId: actor.runId,
+            actorResponsibleUserId: authenticatedActorResponsibleUserId(req),
+            trustExplicitResponsibleUserId: actor.actorType === "user",
+          });
+        if (privateTaskResponsibleUserId) {
+          const personalProject = await ensurePersonalPrivateProject(
+            db,
+            companyId,
+            privateTaskResponsibleUserId,
+          );
+          createAssignmentScope.projectId = personalProject.id;
+        }
+      }
 
       const { policy: resolvedExecutionPolicy, monitorFromRequest } =
         await resolveCreatedIssueExecutionPolicy(
