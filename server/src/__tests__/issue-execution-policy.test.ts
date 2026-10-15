@@ -547,7 +547,86 @@ describe("issue execution policy transitions", () => {
         status: "completed",
         lastDecisionOutcome: "approved",
       });
+      expect(result.patch.status).toBe("in_progress");
+      expect(result.patch.assigneeAgentId).toBe(coderAgentId);
+      expect(result.patch.assigneeUserId).toBeNull();
+    });
+
+    it("reviewDecision: approve on the final stage with status done closes out without reassigning", () => {
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_review",
+          assigneeAgentId: null,
+          assigneeUserId: ctoUserId,
+          executionPolicy: policy,
+          executionState: {
+            status: "pending",
+            currentStageId: approvalStageId,
+            currentStageIndex: 1,
+            currentStageType: "approval",
+            currentParticipant: { type: "user", userId: ctoUserId },
+            returnAssignee: { type: "agent", agentId: coderAgentId },
+            completedStageIds: [reviewStageId],
+            lastDecisionId: null,
+            lastDecisionOutcome: null,
+          },
+        },
+        policy,
+        requestedStatus: "done",
+        requestedAssigneePatch: {},
+        actor: { userId: ctoUserId },
+        commentBody: "Approved and closing out",
+        reviewDecision: "approve",
+      });
+
+      expect(result.patch.executionState).toMatchObject({
+        status: "completed",
+        lastDecisionOutcome: "approved",
+      });
       expect(result.patch.status).toBeUndefined();
+      expect(result.patch.assigneeAgentId).toBeUndefined();
+      expect(result.patch.assigneeUserId).toBeUndefined();
+    });
+
+    it("reviewDecision: request_changes on the final stage is not swallowed by the board override when status is done", () => {
+      const result = applyIssueExecutionPolicyTransition({
+        issue: {
+          status: "in_review",
+          assigneeAgentId: null,
+          assigneeUserId: ctoUserId,
+          executionPolicy: policy,
+          executionState: {
+            status: "pending",
+            currentStageId: approvalStageId,
+            currentStageIndex: 1,
+            currentStageType: "approval",
+            currentParticipant: { type: "user", userId: ctoUserId },
+            returnAssignee: { type: "agent", agentId: coderAgentId },
+            completedStageIds: [reviewStageId],
+            lastDecisionId: null,
+            lastDecisionOutcome: null,
+          },
+        },
+        policy,
+        requestedStatus: "done",
+        requestedAssigneePatch: {},
+        actor: { userId: ctoUserId },
+        allowBoardOverride: true,
+        commentBody: "Not ready, needs another pass",
+        reviewDecision: "request_changes",
+      });
+
+      expect(result.patch.executionState).toMatchObject({
+        status: "changes_requested",
+        lastDecisionOutcome: "changes_requested",
+      });
+      expect(result.patch.status).toBe("in_progress");
+      expect(result.patch.assigneeAgentId).toBe(coderAgentId);
+      expect(result.decision).toMatchObject({
+        stageId: approvalStageId,
+        stageType: "approval",
+        outcome: "changes_requested",
+      });
     });
 
     it("reviewDecision: request_changes is honored even when status stays in_review", () => {

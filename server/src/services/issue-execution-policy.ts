@@ -817,6 +817,10 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
 
         if (!nextStage) {
           patch.executionState = approvedState;
+          if (requestedStatus !== "done") {
+            patch.status = "in_progress";
+            Object.assign(patch, patchForPrincipal(existingState?.returnAssignee ?? null));
+          }
           return {
             patch,
             decision: {
@@ -859,6 +863,7 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
 
       if (
         input.allowBoardOverride &&
+        input.reviewDecision === undefined &&
         requestedStatus &&
         requestedStatus !== "in_review" &&
         requestedStatus !== "in_progress"

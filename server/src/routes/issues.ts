@@ -13784,7 +13784,9 @@ export function issueRoutes(
         req.body.reviewPolicy !== existing.reviewPolicy;
       const reviewVerdictRequested =
         existing.status === "in_review" &&
-        (updateFields.status === "done" || updateFields.status === "cancelled");
+        (updateFields.status === "done" ||
+          updateFields.status === "cancelled" ||
+          reviewDecision !== undefined);
       const mcpReviewSensitiveMutation = mcpParticipationChange;
       const reviewPolicySensitiveMutationRequested =
         mcpReviewSensitiveMutation || req.body.reviewPolicy !== undefined ||
@@ -14521,7 +14523,8 @@ export function issueRoutes(
         const lockedReviewVerdictRequested =
           lockedExisting.status === "in_review" &&
           (updateFields.status === "done" ||
-            updateFields.status === "cancelled");
+            updateFields.status === "cancelled" ||
+            reviewDecision !== undefined);
         if (
           (lockedReviewVerdictRequested || lockedPolicyChangeRequested) &&
           lockedExisting.reviewPolicy != null &&
