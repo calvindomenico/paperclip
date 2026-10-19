@@ -202,6 +202,42 @@ function managedAiHomeEnvironment(home: string): Record<string, string> {
   };
 }
 
+const MANAGED_AI_HOME_CLAIM_FILE = ".paperclip-home-claim.json";
+export const MANAGED_AI_STABLE_HOME_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
+
+async function reclaimStaleManagedAiHome(baseDir: string, now: () => number): Promise<boolean> {
+  let claimedAt: number | undefined;
+  try {
+    const claim = JSON.parse(await readFile(path.join(baseDir, MANAGED_AI_HOME_CLAIM_FILE), "utf8"));
+    claimedAt = typeof claim?.claimedAt === "number" ? claim.claimedAt : undefined;
+  } catch {}
+  if (claimedAt === undefined || now() - claimedAt < MANAGED_AI_STABLE_HOME_STALE_AFTER_MS) return false;
+  await rm(baseDir, { recursive: true, force: true });
+  return true;
+}
+
+export async function claimManagedAiHome(
+  baseDir: string,
+  now: () => number = Date.now,
+): Promise<{ home: string; stable: boolean }> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await mkdir(baseDir, { mode: 0o700 });
+      await writeFile(
+        path.join(baseDir, MANAGED_AI_HOME_CLAIM_FILE),
+        JSON.stringify({ pid: process.pid, claimedAt: now() }),
+        { mode: 0o600 },
+      );
+      return { home: baseDir, stable: true };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (attempt === 0 && (await reclaimStaleManagedAiHome(baseDir, now))) continue;
+      break;
+    }
+  }
+  return { home: await mkdtemp(`${baseDir}-`), stable: false };
+}
+
 /** Only the server-created credential home is volatile; retain all other config. */
 export function managedAiSessionFingerprintConfig(
   config: Record<string, unknown>,
@@ -312,12 +348,9 @@ export async function prepareManagedAiRuntime(
       }
       throw unprocessable("The AI credential changed during preparation; retry this execution");
     })();
-    home = await mkdtemp(
-      path.join(
-        os.tmpdir(),
-        `paperclip-ai-${input.companyId}-${selection.grant.id}-`,
-      ),
-    );
+    ({ home } = await claimManagedAiHome(
+      path.join(os.tmpdir(), `paperclip-ai-${input.companyId}-${selection.grant.id}`),
+    ));
     const providerHome = path.join(home, "provider");
     await mkdir(providerHome, { mode: 0o700 });
     const env: Record<string, unknown> = {
