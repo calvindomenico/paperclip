@@ -550,6 +550,7 @@ describe("issue execution policy transitions", () => {
       expect(result.patch.status).toBe("in_progress");
       expect(result.patch.assigneeAgentId).toBe(coderAgentId);
       expect(result.patch.assigneeUserId).toBeNull();
+      expect(result.workflowControlledAssignment).toBe(true);
     });
 
     it("reviewDecision: approve on the final stage with status done closes out without reassigning", () => {

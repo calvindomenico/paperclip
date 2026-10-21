@@ -463,6 +463,42 @@ describe("issue execution policy routes", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
+  it("rejects an explicit reviewDecision against a human_only policy even when the issue's status has already drifted away from in_review", async () => {
+    const issue = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companyId: "company-1",
+      status: "in_progress",
+      reviewPolicy: "human_only",
+      assigneeAgentId: "33333333-3333-4333-8333-333333333333",
+      assigneeUserId: null,
+      createdByUserId: "local-board",
+      identifier: "PAP-1002",
+      title: "Agent-authored approve bypass attempt via drifted status",
+      executionPolicy: null,
+      executionState: null,
+    };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.getByIdForUpdate.mockResolvedValue(issue);
+
+    const res = await request(await createApp({
+      type: "agent",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      companyId: "company-1",
+      runId: "55555555-5555-4555-8555-555555555555",
+    }))
+      .patch("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+      .send({ status: "in_progress", reviewDecision: "approve", comment: "LGTM, go ahead and push" });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({
+      details: {
+        code: "review_policy_denied",
+        policy: "human_only",
+      },
+    });
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("rejects an agent-authored in_review transition without a review path", async () => {
     const issue = {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
