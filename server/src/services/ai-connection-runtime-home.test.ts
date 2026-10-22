@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { claimManagedAiHome, MANAGED_AI_STABLE_HOME_STALE_AFTER_MS } from "./ai-connection-runtime.js";
 
 const writeFileFailureCountdown = vi.hoisted(() => ({ remaining: 0 }));
+const fakeProcStartTimes = vi.hoisted(() => new Map<number, number>());
 vi.mock("node:fs/promises", async (original) => {
   const filesystem = await original<typeof import("node:fs/promises")>();
   return {
@@ -16,6 +17,16 @@ vi.mock("node:fs/promises", async (original) => {
         throw new Error("simulated disk failure");
       }
       return filesystem.writeFile(...args);
+    },
+    lstat: async (...args: Parameters<typeof filesystem.lstat>) => {
+      const target = args[0];
+      const match = typeof target === "string" ? /^\/proc\/(\d+)$/.exec(target) : null;
+      if (match) {
+        const pid = Number(match[1]);
+        if (!fakeProcStartTimes.has(pid)) throw Object.assign(new Error("no such process"), { code: "ENOENT" });
+        return { ctimeMs: fakeProcStartTimes.get(pid)! } as Awaited<ReturnType<typeof filesystem.lstat>>;
+      }
+      return filesystem.lstat(...args);
     },
   };
 });
@@ -33,6 +44,7 @@ async function tmpRoot() {
 
 afterEach(async () => {
   writeFileFailureCountdown.remaining = 0;
+  fakeProcStartTimes.clear();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -171,5 +183,57 @@ describe("claimManagedAiHome", () => {
 
     const retried = await claimManagedAiHome(baseDir);
     expect(retried).toEqual({ home: baseDir, stable: true });
+  });
+
+  it("never reclaims a claim marked retry-pending after a failed credential write-back, even once its owner is gone", async () => {
+    const root = await tmpRoot();
+    const baseDir = path.join(root, "paperclip-ai-co-grant");
+    await mkdir(baseDir, { mode: 0o700 });
+    await writeFile(path.join(baseDir, "unsaved-rotated-token.txt"), "single-use");
+    await writeFile(
+      path.join(baseDir, ".paperclip-home-claim.json"),
+      JSON.stringify({ pid: deadPid(), claimedAt: 1_000_000, retryPending: true }),
+    );
+
+    const result = await claimManagedAiHome(baseDir, () => 1_000_000 + MANAGED_AI_STABLE_HOME_STALE_AFTER_MS * 10);
+
+    expect(result.stable).toBe(false);
+    expect(result.home).not.toBe(baseDir);
+    expect(await readFile(path.join(baseDir, "unsaved-rotated-token.txt"), "utf8")).toBe("single-use");
+  });
+
+  it("reclaims a stale claim whose pid was reused by an unrelated, newer process", async () => {
+    const root = await tmpRoot();
+    const baseDir = path.join(root, "paperclip-ai-co-grant");
+    fakeProcStartTimes.set(process.pid, 5_000);
+    await mkdir(baseDir, { mode: 0o700 });
+    await writeFile(path.join(baseDir, "leftover-credential.txt"), "stale");
+    await writeFile(
+      path.join(baseDir, ".paperclip-home-claim.json"),
+      JSON.stringify({ pid: process.pid, claimedAt: 1_000_000, startedAtMs: 1_000 }),
+    );
+
+    const result = await claimManagedAiHome(baseDir, () => 1_000_000 + MANAGED_AI_STABLE_HOME_STALE_AFTER_MS + 1);
+
+    expect(result).toEqual({ home: baseDir, stable: true });
+    await expect(stat(path.join(baseDir, "leftover-credential.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not reclaim a stale claim whose live pid's start time still matches the claim", async () => {
+    const root = await tmpRoot();
+    const baseDir = path.join(root, "paperclip-ai-co-grant");
+    fakeProcStartTimes.set(process.pid, 5_000);
+    await mkdir(baseDir, { mode: 0o700 });
+    await writeFile(path.join(baseDir, "live-credential.txt"), "in-flight-run");
+    await writeFile(
+      path.join(baseDir, ".paperclip-home-claim.json"),
+      JSON.stringify({ pid: process.pid, claimedAt: 1_000_000, startedAtMs: 5_000 }),
+    );
+
+    const result = await claimManagedAiHome(baseDir, () => 1_000_000 + MANAGED_AI_STABLE_HOME_STALE_AFTER_MS * 10);
+
+    expect(result.stable).toBe(false);
+    expect(result.home).not.toBe(baseDir);
+    expect(await readFile(path.join(baseDir, "live-credential.txt"), "utf8")).toBe("in-flight-run");
   });
 });

@@ -205,10 +205,25 @@ function managedAiHomeEnvironment(home: string): Record<string, string> {
 const MANAGED_AI_HOME_CLAIM_FILE = ".paperclip-home-claim.json";
 export const MANAGED_AI_STABLE_HOME_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
 
-function claimOwnerGone(pid: unknown): boolean {
+async function pidStartTimeMs(pid: number): Promise<number | undefined> {
+  try {
+    return (await lstat(`/proc/${pid}`)).ctimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
+async function claimOwnerGone(claim: { pid?: unknown; startedAtMs?: unknown }): Promise<boolean> {
+  const pid = claim.pid;
   if (typeof pid !== "number") return true;
-  try { process.kill(pid, 0); return false; }
-  catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+  if (typeof claim.startedAtMs !== "number") return false;
+  const currentStartedAtMs = await pidStartTimeMs(pid);
+  return currentStartedAtMs !== undefined && Math.abs(currentStartedAtMs - claim.startedAtMs) > 2000;
 }
 
 async function isOwnedPrivateDirectory(target: string): Promise<boolean> {
@@ -220,15 +235,23 @@ async function isOwnedPrivateDirectory(target: string): Promise<boolean> {
   }
 }
 
+async function writeManagedAiHomeClaim(
+  baseDir: string,
+  claim: { pid: number; claimedAt: number; startedAtMs?: number; retryPending?: true },
+): Promise<void> {
+  await writeFile(path.join(baseDir, MANAGED_AI_HOME_CLAIM_FILE), JSON.stringify(claim), { mode: 0o600 });
+}
+
 async function reclaimStaleManagedAiHome(baseDir: string, now: () => number): Promise<boolean> {
   if (!(await isOwnedPrivateDirectory(baseDir))) return false;
-  let claim: { pid?: unknown; claimedAt?: unknown } | undefined;
+  let claim: { pid?: unknown; claimedAt?: unknown; startedAtMs?: unknown; retryPending?: unknown } | undefined;
   try {
     claim = JSON.parse(await readFile(path.join(baseDir, MANAGED_AI_HOME_CLAIM_FILE), "utf8"));
   } catch {}
+  if (claim?.retryPending) return false;
   const claimedAt = typeof claim?.claimedAt === "number" ? claim.claimedAt : undefined;
   const expired = claimedAt !== undefined && now() - claimedAt >= MANAGED_AI_STABLE_HOME_STALE_AFTER_MS;
-  if (!expired || !claimOwnerGone(claim?.pid)) return false;
+  if (!expired || !(await claimOwnerGone(claim ?? {}))) return false;
   const graveyard = `${baseDir}.stale-${process.pid}-${now()}`;
   try {
     await rename(baseDir, graveyard);
@@ -253,11 +276,12 @@ export async function claimManagedAiHome(
       break;
     }
     try {
-      await writeFile(
-        path.join(baseDir, MANAGED_AI_HOME_CLAIM_FILE),
-        JSON.stringify({ pid: process.pid, claimedAt: now() }),
-        { mode: 0o600 },
-      );
+      const startedAtMs = await pidStartTimeMs(process.pid);
+      await writeManagedAiHomeClaim(baseDir, {
+        pid: process.pid,
+        claimedAt: now(),
+        ...(startedAtMs !== undefined ? { startedAtMs } : {}),
+      });
     } catch {
       await rm(baseDir, { recursive: true, force: true }).catch(() => {});
       break;
@@ -541,11 +565,16 @@ export async function prepareManagedAiRuntime(
               // The rotated secret revision invalidates quota caches without
               // rejecting an otherwise valid in-flight reconnect.
             }));
-            for (let attempt = 0; ; attempt++) {
-              try { await writeBack(); break; }
-              catch (error) {
-                if (attempt >= 2 || (error as NodeJS.ErrnoException)?.code !== WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE) throw error;
+            try {
+              for (let attempt = 0; ; attempt++) {
+                try { await writeBack(); break; }
+                catch (error) {
+                  if (attempt >= 2 || (error as NodeJS.ErrnoException)?.code !== WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE) throw error;
+                }
               }
+            } catch (error) {
+              if (home) await writeManagedAiHomeClaim(home, { pid: process.pid, claimedAt: Date.now(), retryPending: true }).catch(() => {});
+              throw error;
             }
           }
         }
