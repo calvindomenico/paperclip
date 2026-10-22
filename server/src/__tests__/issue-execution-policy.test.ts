@@ -587,6 +587,7 @@ describe("issue execution policy transitions", () => {
       expect(result.patch.status).toBeUndefined();
       expect(result.patch.assigneeAgentId).toBeUndefined();
       expect(result.patch.assigneeUserId).toBeUndefined();
+      expect(result.workflowControlledAssignment).toBeFalsy();
     });
 
     it("reviewDecision: request_changes on the final stage is not swallowed by the board override when status is done", () => {

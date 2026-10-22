@@ -823,7 +823,7 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
           }
           return {
             patch,
-            workflowControlledAssignment: true,
+            workflowControlledAssignment: requestedStatus !== "done",
             decision: {
               stageId: activeStage.id,
               stageType: activeStage.type,
