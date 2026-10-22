@@ -1084,11 +1084,6 @@ describe("managed AI connections", () => {
     const resumed = await prepareManagedAiRuntime(db, runInput);
     const peer = await prepareManagedAiRuntime(db, { ...runInput, agentId: randomUUID() });
     try {
-      // Stable-home reuse (claimManagedAiHome) deliberately gives a repeated prepare for the same
-      // company+grant the same path once the prior claim is cleaned up -- cross-run continuity is
-      // the owner-approved intent (TIE-1438, 2026-10-22), not a leak: the Grok-transcript-restore
-      // feature this test guards against has zero production references. What still matters, and
-      // is unchanged below, is that nothing is ever decrypted onto disk regardless of home reuse.
       expect(resumed.home).toBe(first.home);
       expect(peer.home).not.toBe(resumed.home);
       const transcript = path.join(String(resumed.config.env.GROK_HOME), "sessions", "history.json");
