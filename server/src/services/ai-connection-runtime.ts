@@ -3,7 +3,7 @@ import type { PluginTaskCredentialWritebackBinding } from "./plugin-task-credent
 import { OPENROUTER_ATTRIBUTION_HEADERS, openRouterClaudeHeaders } from "@paperclipai/shared/openrouter-attribution";
 import { createHash } from "node:crypto";
 import { HttpError, unprocessable } from "../errors.js";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, rename, lstat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
@@ -205,14 +205,38 @@ function managedAiHomeEnvironment(home: string): Record<string, string> {
 const MANAGED_AI_HOME_CLAIM_FILE = ".paperclip-home-claim.json";
 export const MANAGED_AI_STABLE_HOME_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
 
-async function reclaimStaleManagedAiHome(baseDir: string, now: () => number): Promise<boolean> {
-  let claimedAt: number | undefined;
+function claimOwnerGone(pid: unknown): boolean {
+  if (typeof pid !== "number") return true;
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+}
+
+async function isOwnedPrivateDirectory(target: string): Promise<boolean> {
   try {
-    const claim = JSON.parse(await readFile(path.join(baseDir, MANAGED_AI_HOME_CLAIM_FILE), "utf8"));
-    claimedAt = typeof claim?.claimedAt === "number" ? claim.claimedAt : undefined;
+    const stat = await lstat(target);
+    return stat.isDirectory() && stat.uid === process.getuid?.() && (stat.mode & 0o077) === 0;
+  } catch {
+    return false;
+  }
+}
+
+async function reclaimStaleManagedAiHome(baseDir: string, now: () => number): Promise<boolean> {
+  if (!(await isOwnedPrivateDirectory(baseDir))) return false;
+  let claim: { pid?: unknown; claimedAt?: unknown } | undefined;
+  try {
+    claim = JSON.parse(await readFile(path.join(baseDir, MANAGED_AI_HOME_CLAIM_FILE), "utf8"));
   } catch {}
-  if (claimedAt === undefined || now() - claimedAt < MANAGED_AI_STABLE_HOME_STALE_AFTER_MS) return false;
-  await rm(baseDir, { recursive: true, force: true });
+  const claimedAt = typeof claim?.claimedAt === "number" ? claim.claimedAt : undefined;
+  const expired = claimedAt !== undefined && now() - claimedAt >= MANAGED_AI_STABLE_HOME_STALE_AFTER_MS;
+  if (!expired || !claimOwnerGone(claim?.pid)) return false;
+  const graveyard = `${baseDir}.stale-${process.pid}-${now()}`;
+  try {
+    await rename(baseDir, graveyard);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  await rm(graveyard, { recursive: true, force: true });
   return true;
 }
 
@@ -223,17 +247,22 @@ export async function claimManagedAiHome(
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       await mkdir(baseDir, { mode: 0o700 });
-      await writeFile(
-        path.join(baseDir, MANAGED_AI_HOME_CLAIM_FILE),
-        JSON.stringify({ pid: process.pid, claimedAt: now() }),
-        { mode: 0o600 },
-      );
-      return { home: baseDir, stable: true };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       if (attempt === 0 && (await reclaimStaleManagedAiHome(baseDir, now))) continue;
       break;
     }
+    try {
+      await writeFile(
+        path.join(baseDir, MANAGED_AI_HOME_CLAIM_FILE),
+        JSON.stringify({ pid: process.pid, claimedAt: now() }),
+        { mode: 0o600 },
+      );
+    } catch {
+      await rm(baseDir, { recursive: true, force: true }).catch(() => {});
+      break;
+    }
+    return { home: baseDir, stable: true };
   }
   return { home: await mkdtemp(`${baseDir}-`), stable: false };
 }
