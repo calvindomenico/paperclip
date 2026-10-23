@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import { claimManagedAiHome, MANAGED_AI_STABLE_HOME_STALE_AFTER_MS } from "./ai-
 
 const writeFileFailureCountdown = vi.hoisted(() => ({ remaining: 0 }));
 const fakeProcStartTimes = vi.hoisted(() => new Map<number, number>());
+const realProcPids = vi.hoisted(() => new Set<number>());
 vi.mock("node:fs/promises", async (original) => {
   const filesystem = await original<typeof import("node:fs/promises")>();
   return {
@@ -23,6 +24,7 @@ vi.mock("node:fs/promises", async (original) => {
       const match = typeof target === "string" ? /^\/proc\/(\d+)$/.exec(target) : null;
       if (match) {
         const pid = Number(match[1]);
+        if (realProcPids.has(pid)) return filesystem.lstat(...args);
         if (!fakeProcStartTimes.has(pid)) throw Object.assign(new Error("no such process"), { code: "ENOENT" });
         return { ctimeMs: fakeProcStartTimes.get(pid)! } as Awaited<ReturnType<typeof filesystem.lstat>>;
       }
@@ -45,6 +47,7 @@ async function tmpRoot() {
 afterEach(async () => {
   writeFileFailureCountdown.remaining = 0;
   fakeProcStartTimes.clear();
+  realProcPids.clear();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -236,4 +239,39 @@ describe("claimManagedAiHome", () => {
     expect(result.home).not.toBe(baseDir);
     expect(await readFile(path.join(baseDir, "live-credential.txt"), "utf8")).toBe("in-flight-run");
   });
+
+  it.runIf(process.platform === "linux")(
+    "reads a real live process's actual /proc start time, not a faked one, to decide it still owns the claim",
+    async () => {
+      const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"]);
+      await new Promise<void>((resolve, reject) => {
+        child.once("spawn", resolve);
+        child.once("error", reject);
+      });
+      realProcPids.add(child.pid!);
+      const root = await tmpRoot();
+      const baseDir = path.join(root, "paperclip-ai-co-grant");
+      try {
+        const realStartedAtMs = (await lstat(`/proc/${child.pid}`)).ctimeMs;
+        await mkdir(baseDir, { mode: 0o700 });
+        await writeFile(path.join(baseDir, "live-credential.txt"), "in-flight-run");
+        await writeFile(
+          path.join(baseDir, ".paperclip-home-claim.json"),
+          JSON.stringify({ pid: child.pid, claimedAt: 1, startedAtMs: realStartedAtMs }),
+        );
+
+        const whileAlive = await claimManagedAiHome(baseDir, () => 1 + MANAGED_AI_STABLE_HOME_STALE_AFTER_MS * 10);
+
+        expect(whileAlive.stable).toBe(false);
+        expect(whileAlive.home).not.toBe(baseDir);
+        expect(await readFile(path.join(baseDir, "live-credential.txt"), "utf8")).toBe("in-flight-run");
+      } finally {
+        child.kill();
+        await new Promise((resolve) => child.once("exit", resolve));
+      }
+
+      const afterExit = await claimManagedAiHome(baseDir, () => 1 + MANAGED_AI_STABLE_HOME_STALE_AFTER_MS * 10);
+      expect(afterExit).toEqual({ home: baseDir, stable: true });
+    },
+  );
 });
